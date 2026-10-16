@@ -1,0 +1,232 @@
+name: Kernel Info & Merge
+
+on:
+  workflow_dispatch:
+    inputs:
+      action:
+        description: 'العملية: info (عرض الإصدار) أو merge (دمج النواة في boot.img الأصلي)'
+        type: choice
+        options:
+          - info
+          - merge
+        default: info
+      source_url:
+        description: 'رابط مباشر لـ AnyKernel3 zip أو boot.img (أو ملف Image)'
+        required: true
+      boot_url:
+        description: 'رابط boot.img الأصلي (مطلوب عند merge فقط)'
+        required: false
+        default: ''
+      upload_gofile:
+        description: 'رفع الناتج إلى Gofile'
+        type: boolean
+        default: true
+
+jobs:
+  run:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 30
+    env:
+      SRC_URL: ${{ inputs.source_url }}
+      BOOT_URL: ${{ inputs.boot_url }}
+    steps:
+      - name: تجهيز الأدوات
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq lz4 xz-utils bzip2 unzip zip curl jq file binutils python3
+          git clone --depth=1 https://android.googlesource.com/platform/system/tools/mkbootimg mkbootimg
+          ls mkbootimg | head
+          cat > kinfo.py <<'PYEOF'
+          #!/usr/bin/env python3
+          import sys, os, re, zlib, struct, subprocess
+
+          MTK = b'\x88\x16\x88\x58'
+          PRIORITY = ["Image.gz-dtb", "Image.lz4-dtb", "Image-dtb", "Image.gz", "Image.lz4", "Image", "zImage-dtb", "zImage"]
+
+          def decomp(d):
+              if d[:3] == b'\x1f\x8b\x08':
+                  try:
+                      return zlib.decompressobj(31).decompress(d)
+                  except Exception:
+                      pass
+              if d[:4] == b'\x02\x21\x4c\x18':
+                  return subprocess.run(['lz4', '-dc'], input=d, capture_output=True).stdout
+              if d[:6] == b'\xfd7zXZ\x00':
+                  return subprocess.run(['xz', '-dc'], input=d, capture_output=True).stdout
+              if d[:3] == b'BZh':
+                  return subprocess.run(['bzip2', '-dc'], input=d, capture_output=True).stdout
+              return d
+
+          def has_mtk(path):
+              with open(path, 'rb') as f:
+                  return f.read(4) == MTK
+
+          def version(path):
+              d = open(path, 'rb').read()
+              off = 512 if d[:4] == MTK else 0
+              out = decomp(d[off:])
+              m = re.search(rb'Linux version [^\x00\n]{5,300}', out)
+              if not m:
+                  i = d.find(b'\x1f\x8b\x08', 0, 1 << 16)
+                  if i >= 0:
+                      m = re.search(rb'Linux version [^\x00\n]{5,300}', decomp(d[i:]))
+              return m.group(0).decode('latin1') if m else "(لم أجد سلسلة Linux version)"
+
+          def pick(folder):
+              found = {}
+              for root, _, files in os.walk(folder):
+                  for f in files:
+                      found.setdefault(f, os.path.join(root, f))
+              for name in PRIORITY:
+                  if name in found:
+                      return found[name]
+              return ""
+
+          def mtkwrap(orig, new, out):
+              o = open(orig, 'rb').read()
+              n = open(new, 'rb').read()
+              if n[:4] == MTK:
+                  n = n[512:]
+              if o[:4] != MTK:
+                  open(out, 'wb').write(n)
+                  print("no-mtk-header")
+                  return
+              hdr = bytearray(o[:512])
+              struct.pack_into('<I', hdr, 4, len(n))
+              open(out, 'wb').write(bytes(hdr) + n)
+              print("mtk-header-added")
+
+          def main():
+              c = sys.argv[1]
+              if c == 'version':
+                  print(version(sys.argv[2]))
+              elif c == 'pick':
+                  print(pick(sys.argv[2]))
+              elif c == 'mtkwrap':
+                  mtkwrap(sys.argv[2], sys.argv[3], sys.argv[4])
+              elif c == 'hasmtk':
+                  print("yes" if has_mtk(sys.argv[2]) else "no")
+
+          main()
+          PYEOF
+
+      - name: تنزيل الملفات
+        run: |
+          dl() {
+            local u="$1" out="$2"
+            if [[ "$u" =~ pixeldrain\.com/u/([A-Za-z0-9]+) ]]; then
+              u="https://pixeldrain.com/api/file/${BASH_REMATCH[1]}"
+            fi
+            if [[ "$u" =~ gofile\.io/d/ ]]; then
+              echo "::error::رابط صفحة Gofile ليس رابطا مباشرا للملف. استخدم رابط تنزيل مباشر أو PixelDrain."
+              exit 1
+            fi
+            curl -fL --retry 3 -o "$out" "$u" || { echo "::error::فشل تنزيل $u"; exit 1; }
+          }
+          dl "$SRC_URL" src.bin
+          ls -lh src.bin
+          if [ -n "$BOOT_URL" ]; then dl "$BOOT_URL" boot.img; ls -lh boot.img; fi
+
+      - name: عرض معلومات النواة
+        run: |
+          mkdir -p out
+          {
+            echo "### 🔍 معلومات الملف المصدر"
+          } >> $GITHUB_STEP_SUMMARY
+          if [ "$(head -c 8 src.bin)" = "ANDROID!" ]; then
+            KIND=boot
+            mkdir -p unp_src
+            python3 mkbootimg/unpack_bootimg.py --boot_img src.bin --out unp_src | tee info_src.txt
+            KFILE=unp_src/kernel
+          elif [ "$(head -c 2 src.bin)" = "PK" ]; then
+            KIND=zip
+            mkdir -p zsrc && unzip -q -o src.bin -d zsrc
+            KFILE=$(python3 kinfo.py pick zsrc)
+            echo "---- anykernel.sh ----"
+            grep -E '^(kernel.string|do_devicecheck|block|is_slot_device|device.name)' $(find zsrc -name anykernel.sh | head -1) || true
+          else
+            KIND=raw
+            KFILE=src.bin
+          fi
+          [ -n "$KFILE" ] && [ -f "$KFILE" ] || { echo "::error::لم أجد صورة النواة في الملف"; exit 1; }
+          V=$(python3 kinfo.py version "$KFILE")
+          MTK=$(python3 kinfo.py hasmtk "$KFILE")
+          echo "نوع الملف: $KIND"
+          echo "ملف النواة: $KFILE"
+          echo "ترويسة MTK: $MTK"
+          echo "$V"
+          {
+            echo "- نوع الملف: **$KIND**"
+            echo "- صورة النواة: \`$KFILE\`"
+            echo "- ترويسة MTK: $MTK"
+            echo ""
+            echo '```'
+            echo "$V"
+            echo '```'
+            if [ -f info_src.txt ]; then echo '```'; cat info_src.txt; echo '```'; fi
+          } >> $GITHUB_STEP_SUMMARY
+          echo "$KFILE" > .newk
+          { echo "$V"; } > out/kernel-version.txt
+
+      - name: دمج النواة في boot.img الأصلي
+        if: ${{ inputs.action == 'merge' }}
+        run: |
+          [ -f boot.img ] || { echo "::error::للدمج يجب إعطاء boot_url (boot.img الأصلي)"; exit 1; }
+          [ "$(head -c 8 boot.img)" = "ANDROID!" ] || { echo "::error::boot.img الأصلي غير صالح"; exit 1; }
+          NEWK=$(cat .newk)
+
+          mkdir -p unp_orig
+          python3 mkbootimg/unpack_bootimg.py --boot_img boot.img --out unp_orig > orig_info.txt
+          cat orig_info.txt
+          ARGS=$(python3 mkbootimg/unpack_bootimg.py --boot_img boot.img --out unp_orig --format=mkbootimg | tail -n 1)
+          echo "mkbootimg args: $ARGS"
+          OLDV=$(python3 kinfo.py version unp_orig/kernel)
+
+          python3 kinfo.py mtkwrap unp_orig/kernel "$NEWK" new_kernel
+          cp new_kernel unp_orig/kernel
+          eval "python3 mkbootimg/mkbootimg.py $ARGS -o out/boot-merged.img"
+
+          # تحقق: فك الناتج ومقارنة الأجزاء الأخرى
+          mkdir -p unp_new
+          python3 mkbootimg/unpack_bootimg.py --boot_img out/boot-merged.img --out unp_new > new_info.txt
+          NEWV=$(python3 kinfo.py version unp_new/kernel)
+          RD="مختلف ⚠️"; cmp -s unp_new/ramdisk <(cat unp_orig/ramdisk) && RD="مطابق ✅"
+          DT="لا يوجد"; [ -f unp_orig/dtb ] && { DT="مختلف ⚠️"; cmp -s unp_new/dtb unp_orig/dtb && DT="مطابق ✅"; }
+          OS=$(stat -c %s boot.img); NS=$(stat -c %s out/boot-merged.img)
+          AVB="لا"; tail -c 4096 boot.img | grep -q AVBf && AVB="نعم (الأصلي فيه AVB footer ولا يُنسخ للناتج)"
+
+          {
+            echo "### 🧩 نتيجة الدمج"
+            echo "- النواة القديمة: \`$OLDV\`"
+            echo "- النواة الجديدة: \`$NEWV\`"
+            echo "- ramdisk: $RD — dtb: $DT"
+            echo "- حجم الأصلي: $OS بايت، حجم الناتج: $NS بايت"
+            echo "- AVB footer في الأصلي: $AVB"
+          } | tee -a $GITHUB_STEP_SUMMARY
+          [ "$NS" -gt "$OS" ] && echo "::warning::حجم الناتج أكبر من الأصلي، تأكد أنه يتسع في قسم boot"
+          ls -lh out
+
+      - name: رفع الناتج إلى Gofile
+        if: ${{ success() && inputs.upload_gofile }}
+        continue-on-error: true
+        run: |
+          (cd out && zip -r9 ../all-output.zip . >/dev/null)
+          URL=""
+          for f in out/boot-merged.img all-output.zip; do
+            [ -f "$f" ] || continue
+            RES=$(curl -sf -F "file=@$f" https://upload.gofile.io/uploadfile || true)
+            if ! echo "$RES" | jq -e '.data.downloadPage' >/dev/null 2>&1; then
+              SRV=$(curl -sf https://api.gofile.io/servers | jq -r '.data.servers[0].name' || true)
+              [ -n "$SRV" ] && RES=$(curl -sf -F "file=@$f" "https://${SRV}.gofile.io/contents/uploadfile" || true)
+            fi
+            LINK=$(echo "$RES" | jq -r '.data.downloadPage // empty' 2>/dev/null || true)
+            if [ -n "$LINK" ]; then URL="$URL- $(basename "$f"): $LINK"$'\n'; else echo "::warning::فشل رفع $f: $RES"; fi
+          done
+          [ -n "$URL" ] && { echo "### 🔗 روابط Gofile"; echo "$URL"; } >> $GITHUB_STEP_SUMMARY
+
+      - name: رفع الناتج (artifact)
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: kernel-info-merge
+          path: out/*
