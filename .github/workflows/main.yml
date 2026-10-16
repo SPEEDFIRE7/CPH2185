@@ -1,0 +1,18 @@
+name: List KernelSU tags
+
+on:
+  workflow_dispatch:
+
+jobs:
+  list:
+    runs-on: ubuntu-22.04
+    steps:
+      - name: KernelSU-Next (فروع + وسوم)
+        run: |
+          U=https://github.com/KernelSU-Next/KernelSU-Next
+          echo "== الفروع =="; git ls-remote --heads $U | awk '{print $2}' | sed 's|refs/heads/||'
+          echo "== آخر 40 وسما =="; git ls-remote --tags --refs $U | awk '{print $2}' | sed 's|refs/tags/||' | sort -V | tail -40
+      - name: KernelSU الرسمي (وسوم قديمة تدعم non-GKI)
+        run: |
+          U=https://github.com/tiann/KernelSU
+          git ls-remote --tags --refs $U | awk '{print $2}' | sed 's|refs/tags/||' | sort -V | grep -E '^v0\.' | tail -15
