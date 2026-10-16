@@ -1,0 +1,507 @@
+name: Build SOD Killer M3 APK
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main, master]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: 8.7
+
+      - name: Accept Android SDK licenses
+        run: yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses || true
+
+      - name: Generate project
+        run: |
+          mkdir -p app/src/main/java/com/sodkiller
+          mkdir -p app/src/main/res/layout app/src/main/res/drawable
+          mkdir -p app/src/main/res/mipmap-anydpi-v26
+          for d in values values-ar values-fr; do
+            mkdir -p app/src/main/res/$d
+          done
+
+          cat > settings.gradle <<'EOF'
+          pluginManagement {
+              repositories { google(); mavenCentral(); gradlePluginPortal() }
+          }
+          dependencyResolutionManagement {
+              repositories { google(); mavenCentral() }
+          }
+          rootProject.name = "SodKiller"
+          include ':app'
+          EOF
+
+          cat > gradle.properties <<'EOF'
+          android.useAndroidX=true
+          org.gradle.jvmargs=-Xmx2g -Dfile.encoding=UTF-8
+          EOF
+
+          cat > build.gradle <<'EOF'
+          plugins { id 'com.android.application' version '8.5.2' apply false }
+          EOF
+
+          cat > app/build.gradle <<'EOF'
+          plugins { id 'com.android.application' }
+          android {
+              namespace 'com.sodkiller'
+              compileSdk 34
+              defaultConfig {
+                  applicationId 'com.sodkiller.m3'
+                  minSdk 29
+                  targetSdk 29
+                  versionCode 1
+                  versionName '1.0'
+              }
+              compileOptions {
+                  sourceCompatibility JavaVersion.VERSION_17
+                  targetCompatibility JavaVersion.VERSION_17
+              }
+          }
+          dependencies {
+              implementation 'com.google.android.material:material:1.12.0'
+          }
+          EOF
+
+          cat > app/src/main/AndroidManifest.xml <<'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+              <uses-permission android:name="android.permission.WAKE_LOCK"/>
+              <uses-permission android:name="android.permission.FOREGROUND_SERVICE"/>
+              <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED"/>
+
+              <application
+                  android:label="SOD Killer"
+                  android:icon="@mipmap/ic_launcher"
+                  android:roundIcon="@mipmap/ic_launcher"
+                  android:supportsRtl="true"
+                  android:theme="@style/Theme.SodKiller">
+
+                  <activity android:name=".MainActivity" android:exported="true">
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN"/>
+                          <category android:name="android.intent.category.LAUNCHER"/>
+                      </intent-filter>
+                  </activity>
+
+                  <service android:name=".WakeService" android:exported="false"/>
+
+                  <receiver android:name=".BootReceiver" android:exported="true">
+                      <intent-filter>
+                          <action android:name="android.intent.action.BOOT_COMPLETED"/>
+                          <action android:name="android.intent.action.MY_PACKAGE_REPLACED"/>
+                      </intent-filter>
+                  </receiver>
+              </application>
+          </manifest>
+          EOF
+
+          cat > app/src/main/res/values/themes.xml <<'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <resources>
+              <style name="Theme.SodKiller" parent="Theme.Material3.DynamicColors.DayNight"/>
+          </resources>
+          EOF
+
+          cat > app/src/main/res/values/colors.xml <<'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <resources>
+              <color name="ic_launcher_background">#1B1B1F</color>
+          </resources>
+          EOF
+
+          cat > app/src/main/res/drawable/ic_launcher_foreground.xml <<'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <vector xmlns:android="http://schemas.android.com/apk/res/android"
+              android:width="108dp"
+              android:height="108dp"
+              android:viewportWidth="108"
+              android:viewportHeight="108">
+              <path
+                  android:strokeColor="#A8C7FA"
+                  android:strokeWidth="5"
+                  android:strokeLineCap="round"
+                  android:pathData="M43.5,44 A18,18 0 1 0 64.5,44"/>
+              <path
+                  android:strokeColor="#A8C7FA"
+                  android:strokeWidth="5"
+                  android:strokeLineCap="round"
+                  android:pathData="M54,34 L54,56"/>
+          </vector>
+          EOF
+
+          cat > app/src/main/res/mipmap-anydpi-v26/ic_launcher.xml <<'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">
+              <background android:drawable="@color/ic_launcher_background"/>
+              <foreground android:drawable="@drawable/ic_launcher_foreground"/>
+              <monochrome android:drawable="@drawable/ic_launcher_foreground"/>
+          </adaptive-icon>
+          EOF
+
+          # ---------------- Strings ----------------
+          cat > app/src/main/res/values/strings.xml <<'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <resources>
+              <string name="sw_enable">Enable SOD Killer</string>
+              <string name="sw_foreground">Keep in the foreground</string>
+              <string name="status_on">Wake lock active: the device will not fall into deep sleep</string>
+              <string name="status_off">Wake lock released: normal sleep behavior</string>
+              <string name="about">About</string>
+              <string name="about_body">Holds a wake lock so the device never falls into deep sleep. This helps avoid the Sleep of Death (SOD) issue seen on some devices, such as the Nexus 4. Expect higher battery usage.</string>
+              <string name="fg_body">Foreground mode shows a notification and makes it harder for the system to stop the service.</string>
+              <string name="boot_body">After a reboot, the setting is restored automatically.</string>
+              <string name="notif_title">SOD Killer is running</string>
+              <string name="notif_text">Wake lock is held</string>
+          </resources>
+          EOF
+
+          cat > app/src/main/res/values-ar/strings.xml <<'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <resources>
+              <string name="sw_enable">تفعيل SOD Killer</string>
+              <string name="sw_foreground">البقاء في الواجهة الأمامية</string>
+              <string name="status_on">القفل نشط: لن يدخل الجهاز في النوم العميق</string>
+              <string name="status_off">تم تحرير القفل: سلوك النوم الطبيعي</string>
+              <string name="about">حول التطبيق</string>
+              <string name="about_body">يحتفظ بقفل التشغيل (Wake Lock) حتى لا يدخل الجهاز في النوم العميق. يساعد ذلك على تجنب مشكلة موت النوم (SOD) في بعض الأجهزة مثل Nexus 4. توقّع استهلاكاً أعلى للبطارية.</string>
+              <string name="fg_body">الوضع الأمامي يعرض إشعاراً ويصعّب على النظام إيقاف الخدمة.</string>
+              <string name="boot_body">بعد إعادة التشغيل تُستعاد الإعدادات تلقائياً.</string>
+              <string name="notif_title">SOD Killer يعمل</string>
+              <string name="notif_text">قفل التشغيل نشط</string>
+          </resources>
+          EOF
+
+          cat > app/src/main/res/values-fr/strings.xml <<'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <resources>
+              <string name="sw_enable">Activer SOD Killer</string>
+              <string name="sw_foreground">Garder au premier plan</string>
+              <string name="status_on">Wake lock actif : l’appareil ne passera pas en veille profonde</string>
+              <string name="status_off">Wake lock relâché : comportement de veille normal</string>
+              <string name="about">À propos</string>
+              <string name="about_body">Maintient un wake lock pour que l’appareil ne tombe jamais en veille profonde. Cela aide à éviter le problème Sleep of Death (SOD) de certains appareils, comme le Nexus 4. Attendez-vous à une consommation de batterie plus élevée.</string>
+              <string name="fg_body">Le mode premier plan affiche une notification et rend l’arrêt du service plus difficile pour le système.</string>
+              <string name="boot_body">Après un redémarrage, le réglage est restauré automatiquement.</string>
+              <string name="notif_title">SOD Killer est en cours</string>
+              <string name="notif_text">Le wake lock est maintenu</string>
+          </resources>
+          EOF
+
+          # ---------------- Layout ----------------
+          cat > app/src/main/res/layout/activity_main.xml <<'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <ScrollView xmlns:android="http://schemas.android.com/apk/res/android"
+              xmlns:app="http://schemas.android.com/apk/res-auto"
+              android:layout_width="match_parent"
+              android:layout_height="match_parent"
+              android:fillViewport="true"
+              android:background="?attr/colorSurface">
+
+              <LinearLayout
+                  android:layout_width="match_parent"
+                  android:layout_height="wrap_content"
+                  android:orientation="vertical"
+                  android:paddingStart="24dp"
+                  android:paddingEnd="24dp"
+                  android:paddingTop="72dp"
+                  android:paddingBottom="32dp">
+
+                  <TextView
+                      android:layout_width="match_parent"
+                      android:layout_height="wrap_content"
+                      android:layout_marginBottom="24dp"
+                      android:text="SOD Killer"
+                      android:textAppearance="?attr/textAppearanceDisplayMedium"
+                      android:textColor="?attr/colorOnSurface"/>
+
+                  <com.google.android.material.card.MaterialCardView
+                      android:layout_width="match_parent"
+                      android:layout_height="wrap_content"
+                      app:cardCornerRadius="28dp"
+                      app:cardElevation="0dp"
+                      app:cardBackgroundColor="?attr/colorPrimaryContainer">
+
+                      <TextView
+                          android:id="@+id/status"
+                          android:layout_width="match_parent"
+                          android:layout_height="wrap_content"
+                          android:padding="24dp"
+                          android:textAppearance="?attr/textAppearanceTitleLarge"
+                          android:textColor="?attr/colorOnPrimaryContainer"/>
+                  </com.google.android.material.card.MaterialCardView>
+
+                  <com.google.android.material.card.MaterialCardView
+                      android:layout_width="match_parent"
+                      android:layout_height="wrap_content"
+                      android:layout_marginTop="16dp"
+                      app:cardCornerRadius="28dp"
+                      app:cardElevation="0dp"
+                      app:cardBackgroundColor="?attr/colorSurfaceContainerHigh">
+
+                      <LinearLayout
+                          android:layout_width="match_parent"
+                          android:layout_height="wrap_content"
+                          android:orientation="vertical"
+                          android:padding="24dp">
+
+                          <LinearLayout
+                              android:layout_width="match_parent"
+                              android:layout_height="wrap_content"
+                              android:orientation="horizontal"
+                              android:gravity="center_vertical">
+
+                              <TextView
+                                  android:layout_width="0dp"
+                                  android:layout_height="wrap_content"
+                                  android:layout_weight="1"
+                                  android:text="@string/sw_enable"
+                                  android:textAppearance="?attr/textAppearanceTitleMedium"
+                                  android:textColor="?attr/colorOnSurface"/>
+
+                              <com.google.android.material.materialswitch.MaterialSwitch
+                                  android:id="@+id/swEnable"
+                                  android:layout_width="wrap_content"
+                                  android:layout_height="wrap_content"/>
+                          </LinearLayout>
+
+                          <LinearLayout
+                              android:layout_width="match_parent"
+                              android:layout_height="wrap_content"
+                              android:layout_marginTop="16dp"
+                              android:orientation="horizontal"
+                              android:gravity="center_vertical">
+
+                              <TextView
+                                  android:layout_width="0dp"
+                                  android:layout_height="wrap_content"
+                                  android:layout_weight="1"
+                                  android:text="@string/sw_foreground"
+                                  android:textAppearance="?attr/textAppearanceTitleMedium"
+                                  android:textColor="?attr/colorOnSurface"/>
+
+                              <com.google.android.material.materialswitch.MaterialSwitch
+                                  android:id="@+id/swForeground"
+                                  android:layout_width="wrap_content"
+                                  android:layout_height="wrap_content"/>
+                          </LinearLayout>
+                      </LinearLayout>
+                  </com.google.android.material.card.MaterialCardView>
+
+                  <com.google.android.material.card.MaterialCardView
+                      android:layout_width="match_parent"
+                      android:layout_height="wrap_content"
+                      android:layout_marginTop="16dp"
+                      app:cardCornerRadius="28dp"
+                      app:cardElevation="0dp"
+                      app:cardBackgroundColor="?attr/colorSurfaceContainer">
+
+                      <LinearLayout
+                          android:layout_width="match_parent"
+                          android:layout_height="wrap_content"
+                          android:orientation="vertical"
+                          android:padding="24dp">
+
+                          <TextView
+                              android:layout_width="match_parent"
+                              android:layout_height="wrap_content"
+                              android:text="@string/about"
+                              android:textAppearance="?attr/textAppearanceTitleMedium"
+                              android:textColor="?attr/colorOnSurface"/>
+
+                          <TextView
+                              android:layout_width="match_parent"
+                              android:layout_height="wrap_content"
+                              android:layout_marginTop="8dp"
+                              android:text="@string/about_body"
+                              android:textAppearance="?attr/textAppearanceBodyMedium"
+                              android:textColor="?attr/colorOnSurfaceVariant"/>
+
+                          <TextView
+                              android:layout_width="match_parent"
+                              android:layout_height="wrap_content"
+                              android:layout_marginTop="12dp"
+                              android:text="@string/fg_body"
+                              android:textAppearance="?attr/textAppearanceBodyMedium"
+                              android:textColor="?attr/colorOnSurfaceVariant"/>
+
+                          <TextView
+                              android:layout_width="match_parent"
+                              android:layout_height="wrap_content"
+                              android:layout_marginTop="12dp"
+                              android:text="@string/boot_body"
+                              android:textAppearance="?attr/textAppearanceBodyMedium"
+                              android:textColor="?attr/colorOnSurfaceVariant"/>
+                      </LinearLayout>
+                  </com.google.android.material.card.MaterialCardView>
+              </LinearLayout>
+          </ScrollView>
+          EOF
+
+          # ---------------- Java ----------------
+          cat > app/src/main/java/com/sodkiller/WakeService.java <<'EOF'
+          package com.sodkiller;
+
+          import android.app.Notification;
+          import android.app.NotificationChannel;
+          import android.app.NotificationManager;
+          import android.app.PendingIntent;
+          import android.app.Service;
+          import android.content.Context;
+          import android.content.Intent;
+          import android.content.SharedPreferences;
+          import android.os.IBinder;
+          import android.os.PowerManager;
+
+          public class WakeService extends Service {
+              private static final String CH = "sod";
+              private PowerManager.WakeLock wl;
+              private Thread worker;
+              private volatile boolean running = false;
+
+              @Override
+              public void onCreate() {
+                  super.onCreate();
+                  NotificationChannel c = new NotificationChannel(CH, "SOD Killer", NotificationManager.IMPORTANCE_LOW);
+                  getSystemService(NotificationManager.class).createNotificationChannel(c);
+              }
+
+              @Override
+              public int onStartCommand(Intent intent, int flags, int startId) {
+                  SharedPreferences sp = getSharedPreferences("p", MODE_PRIVATE);
+                  boolean fg = sp.getBoolean("fg", true);
+
+                  PendingIntent pi = PendingIntent.getActivity(this, 0,
+                      new Intent(this, MainActivity.class), PendingIntent.FLAG_IMMUTABLE);
+                  Notification n = new Notification.Builder(this, CH)
+                      .setSmallIcon(android.R.drawable.ic_lock_power_off)
+                      .setContentTitle(getString(R.string.notif_title))
+                      .setContentText(getString(R.string.notif_text))
+                      .setContentIntent(pi)
+                      .setOngoing(true)
+                      .build();
+
+                  // Must enter foreground first (service started with startForegroundService).
+                  startForeground(1, n);
+                  if (!fg) stopForeground(Service.STOP_FOREGROUND_REMOVE);
+
+                  if (wl == null) {
+                      PowerManager pm = (PowerManager) getSystemService(Context.POWER_SERVICE);
+                      wl = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "sodkiller:lock");
+                      wl.setReferenceCounted(false);
+                  }
+                  if (!wl.isHeld()) wl.acquire();
+
+                  // Like the original app: a live worker thread that wakes every 30 minutes
+                  // to check whether the feature is still enabled.
+                  if (worker == null || !worker.isAlive()) {
+                      running = true;
+                      worker = new Thread(() -> {
+                          while (running && getSharedPreferences("p", MODE_PRIVATE).getBoolean("enabled", false)) {
+                              try {
+                                  Thread.sleep(30 * 60 * 1000L);
+                              } catch (InterruptedException e) {
+                                  break;
+                              }
+                          }
+                      }, "sod-worker");
+                      worker.start();
+                  }
+                  return START_STICKY;
+              }
+
+              @Override
+              public void onDestroy() {
+                  running = false;
+                  if (worker != null) worker.interrupt();
+                  if (wl != null && wl.isHeld()) wl.release();
+                  super.onDestroy();
+              }
+
+              @Override
+              public IBinder onBind(Intent intent) { return null; }
+          }
+          EOF
+
+          cat > app/src/main/java/com/sodkiller/BootReceiver.java <<'EOF'
+          package com.sodkiller;
+
+          import android.content.BroadcastReceiver;
+          import android.content.Context;
+          import android.content.Intent;
+
+          public class BootReceiver extends BroadcastReceiver {
+              @Override
+              public void onReceive(Context c, Intent i) {
+                  if ((Intent.ACTION_BOOT_COMPLETED.equals(i.getAction()) || Intent.ACTION_MY_PACKAGE_REPLACED.equals(i.getAction()))
+                      && c.getSharedPreferences("p", Context.MODE_PRIVATE).getBoolean("enabled", false)) {
+                      c.startForegroundService(new Intent(c, WakeService.class));
+                  }
+              }
+          }
+          EOF
+
+          cat > app/src/main/java/com/sodkiller/MainActivity.java <<'EOF'
+          package com.sodkiller;
+
+          import android.content.Intent;
+          import android.content.SharedPreferences;
+          import android.os.Bundle;
+          import android.widget.TextView;
+          import androidx.appcompat.app.AppCompatActivity;
+          import com.google.android.material.materialswitch.MaterialSwitch;
+
+          public class MainActivity extends AppCompatActivity {
+              private SharedPreferences sp;
+              private TextView status;
+
+              private void startWake() {
+                  startForegroundService(new Intent(this, WakeService.class));
+              }
+
+              private void renderStatus() {
+                  status.setText(sp.getBoolean("enabled", false) ? R.string.status_on : R.string.status_off);
+              }
+
+              @Override
+              protected void onCreate(Bundle b) {
+                  super.onCreate(b);
+                  setContentView(R.layout.activity_main);
+                  sp = getSharedPreferences("p", MODE_PRIVATE);
+                  status = findViewById(R.id.status);
+                  MaterialSwitch swEnable = findViewById(R.id.swEnable);
+                  MaterialSwitch swFg = findViewById(R.id.swForeground);
+
+                  swEnable.setChecked(sp.getBoolean("enabled", false));
+                  swFg.setChecked(sp.getBoolean("fg", true));
+                  renderStatus();
+
+                  swEnable.setOnCheckedChangeListener((v, on) -> {
+                      sp.edit().putBoolean("enabled", on).apply();
+                      if (on) startWake(); else stopService(new Intent(this, WakeService.class));
+                      renderStatus();
+                  });
+                  swFg.setOnCheckedChangeListener((v, on) -> {
+                      sp.edit().putBoolean("fg", on).apply();
+                      if (sp.getBoolean("enabled", false)) startWake();
+                  });
+              }
+          }
+          EOF
+
+      - name: Build
+        run: gradle assembleDebug --no-daemon -Pandroid.useAndroidX=true
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: SodKiller-M3-apk
+          path: app/build/outputs/apk/debug/*.apk
