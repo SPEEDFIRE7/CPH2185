@@ -1,0 +1,70 @@
+name: y6ii-system-zip
+on:
+  workflow_dispatch:
+    inputs:
+      url:
+        description: رابط update.zip أو UPDATE.APP
+        required: true
+jobs:
+  extract:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y android-sdk-libsparse-utils p7zip-full aria2 zip
+
+      - name: Download
+        run: |
+          aria2c -x16 -o fw.bin "${{ inputs.url }}"
+          mkdir fw
+          7z x fw.bin -ofw -y || cp fw.bin fw/UPDATE.APP
+
+      - name: Split UPDATE.APP
+        run: |
+          APP=$(find fw -iname 'UPDATE.APP' | head -1)
+          mkdir out
+          python3 - "$APP" <<'EOF'
+          import sys, struct
+          d = open(sys.argv[1], 'rb').read()
+          pos = d.find(b'\x55\xAA\x5A\xA5')
+          while pos != -1 and pos + 98 <= len(d):
+              hs = struct.unpack('<I', d[pos+4:pos+8])[0]
+              fsz = struct.unpack('<I', d[pos+20:pos+24])[0]
+              name = d[pos+56:pos+72].split(b'\0')[0].decode(errors='ignore')
+              start = pos + hs
+              open(f'out/{name}.img', 'wb').write(d[start:start+fsz])
+              print(name, fsz)
+              pos = (start + fsz + 3) & ~3
+              if d[pos:pos+4] != b'\x55\xAA\x5A\xA5':
+                  pos = d.find(b'\x55\xAA\x5A\xA5', pos)
+          EOF
+          ls -lh out
+
+      - name: Convert system to raw
+        run: |
+          cd out
+          S=$(ls | grep -i '^system' | head -1)
+          file "$S"
+          simg2img "$S" system.img 2>/dev/null || cp "$S" system.img
+          file system.img
+
+      - name: Zip
+        run: |
+          cd out
+          zip -9 ../y6ii-system.zip system.img
+          ls -lh ../y6ii-system.zip
+
+      - name: Upload and print link
+        run: |
+          RES=$(curl -s -F "file=@y6ii-system.zip" https://upload.gofile.io/uploadfile)
+          echo "$RES"
+          LINK=$(echo "$RES" | python3 -c "import sys,json; print(json.load(sys.stdin)['data']['downloadPage'])")
+          echo "::notice title=رابط التحميل::$LINK"
+          echo "### رابط التحميل: $LINK" >> $GITHUB_STEP_SUMMARY
+
+      - name: Backup artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: y6ii-system-zip
+          path: y6ii-system.zip
