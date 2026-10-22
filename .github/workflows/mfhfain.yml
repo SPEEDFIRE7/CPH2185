@@ -1,4 +1,4 @@
-name: Keeeeernel Builder (مع KernelSU Next)
+name: Kernel Builder (مع KernelSU Next)
 
 on:
   workflow_dispatch:
@@ -367,6 +367,17 @@ jobs:
               || { echo "::error::CONFIG_KSU لم يُفعَّل في .config (تحقق من Kconfig)"; exit 1; }
           fi
 
+          # KernelSU-Next يعدّل fs/namespace.c و fs/internal.h و selinux/* و seccomp
+          # أثناء قراءة Makefile الخاص به، وهذا يحدث بعد ترجمة fs/ في البناء العادي
+          # (فيظهر: undefined reference to path_umount). لذلك نمرّره أولا ليطبّق
+          # تعديلاته، ثم يعيد البناء الكامل ترجمة الملفات المعدّلة.
+          if [ "${{ inputs.add_ksu }}" = "true" ]; then
+            make -j$(nproc --all) O=out ARCH=arm64 CC=clang ${{ inputs.extra_make_args }} prepare drivers/kernelsu/ 2>&1 | tee ../ksu-prepass.log || true
+            grep -q "path_umount" fs/namespace.c \
+              || { echo "::error::لم يُطبَّق patch الخاص بـ path_umount في fs/namespace.c"; exit 1; }
+            echo "تم تطبيق patches الخاصة بـ KernelSU قبل البناء الكامل"
+          fi
+
           make -j$(nproc --all) O=out ARCH=arm64 CC=clang ${{ inputs.extra_make_args }} Image 2>&1 | tee ../build.log
           echo "secs=$(( $(date +%s) - START ))" >> $GITHUB_OUTPUT
 
@@ -471,4 +482,3 @@ jobs:
           name: build-log
           path: build.log
           if-no-files-found: ignore
-          
