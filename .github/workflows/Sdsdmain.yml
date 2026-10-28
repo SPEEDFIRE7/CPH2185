@@ -1,0 +1,204 @@
+Claude
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+Build spdhost app · YML
+name: Build SPD Host Android App
+ 
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main ]
+ 
+env:
+  NDK_VERSION: "26.3.11579264"
+  SPD_REPO: "Seuj09/Spd_dump_termux"
+  SPD_BRANCH: "experiment/brom-hello-diagnostics"
+ 
+jobs:
+  # ---------------------------------------------------------------------
+  # 1) Compiler libusb pour Android (arm64-v8a + armeabi-v7a)
+  # ---------------------------------------------------------------------
+  build-libusb:
+    runs-on: ubuntu-24.04
+    strategy:
+      matrix:
+        abi: [arm64-v8a, armeabi-v7a]
+    steps:
+      - name: Set up Android NDK
+        uses: nttld/setup-ndk@v1
+        id: setup-ndk
+        with:
+          ndk-version: ${{ env.NDK_VERSION }}
+ 
+      - name: Clone libusb
+        run: git clone --depth 1 https://github.com/libusb/libusb.git
+ 
+      - name: Install autotools
+        run: sudo apt-get update && sudo apt-get install -y autoconf automake libtool pkg-config
+ 
+      - name: Build libusb for ${{ matrix.abi }}
+        working-directory: libusb
+        env:
+          ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
+        run: |
+          ./autogen.sh || autoreconf -fi
+ 
+          case "${{ matrix.abi }}" in
+            arm64-v8a)
+              TARGET_HOST=aarch64-linux-android
+              API=24
+              ;;
+            armeabi-v7a)
+              TARGET_HOST=armv7a-linux-androideabi
+              API=24
+              ;;
+          esac
+ 
+          TOOLCHAIN=$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64
+          export AR=$TOOLCHAIN/bin/llvm-ar
+          export CC=$TOOLCHAIN/bin/${TARGET_HOST}${API}-clang
+          export CXX=$TOOLCHAIN/bin/${TARGET_HOST}${API}-clang++
+          export LD=$TOOLCHAIN/bin/ld
+          export RANLIB=$TOOLCHAIN/bin/llvm-ranlib
+          export STRIP=$TOOLCHAIN/bin/llvm-strip
+ 
+          ./configure --host=${TARGET_HOST} --prefix=$PWD/out-${{ matrix.abi }} \
+            --disable-shared --enable-static --disable-udev
+          make -j$(nproc)
+          make install
+ 
+      - name: Upload libusb build
+        uses: actions/upload-artifact@v4
+        with:
+          name: libusb-${{ matrix.abi }}
+          path: libusb/out-${{ matrix.abi }}
+ 
+  # ---------------------------------------------------------------------
+  # 2) Compiler l'outil spd_dump (lié statiquement à libusb)
+  # ---------------------------------------------------------------------
+  build-native:
+    needs: build-libusb
+    runs-on: ubuntu-24.04
+    strategy:
+      matrix:
+        abi: [arm64-v8a, armeabi-v7a]
+    steps:
+      - name: Set up Android NDK
+        uses: nttld/setup-ndk@v1
+        id: setup-ndk
+        with:
+          ndk-version: ${{ env.NDK_VERSION }}
+ 
+      - name: Clone Spd_dump_termux
+        run: |
+          git clone --depth 1 --branch ${{ env.SPD_BRANCH }} \
+            https://github.com/${{ env.SPD_REPO }}.git spd-src
+ 
+      - name: Download libusb build
+        uses: actions/download-artifact@v4
+        with:
+          name: libusb-${{ matrix.abi }}
+          path: libusb-out
+ 
+      - name: Compile spd_dump for ${{ matrix.abi }}
+        env:
+          ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
+        run: |
+          case "${{ matrix.abi }}" in
+            arm64-v8a)
+              TARGET_HOST=aarch64-linux-android
+              API=24
+              ;;
+            armeabi-v7a)
+              TARGET_HOST=armv7a-linux-androideabi
+              API=24
+              ;;
+          esac
+ 
+          TOOLCHAIN=$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64
+          CC=$TOOLCHAIN/bin/${TARGET_HOST}${API}-clang
+ 
+          mkdir -p build-${{ matrix.abi }}
+ 
+          # Adapter la liste de sources ci-dessous selon le dossier réel
+          # (ex: spd-src/no-root/*.c) une fois le repo confirmé.
+          SRC_DIR="spd-src/no-root"
+          if [ ! -d "$SRC_DIR" ]; then SRC_DIR="spd-src"; fi
+ 
+          $CC -O2 -I libusb-out/include/libusb-1.0 \
+            $(find "$SRC_DIR" -maxdepth 1 -name '*.c') \
+            libusb-out/lib/libusb-1.0.a \
+            -o build-${{ matrix.abi }}/spd_dump \
+            -static-libstdc++ -landroid -llog -lpthread
+ 
+      - name: Upload native binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: spd_dump-${{ matrix.abi }}
+          path: build-${{ matrix.abi }}/spd_dump
+ 
+  # ---------------------------------------------------------------------
+  # 3) Assembler l'APK (binaire natif + permission USB)
+  # ---------------------------------------------------------------------
+  build-apk:
+    needs: build-native
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout app shell project
+        uses: actions/checkout@v4
+        # Ce dépôt doit contenir le projet Gradle minimal (app Java/Kotlin
+        # avec UsbManager + ProcessBuilder pour lancer spd_dump).
+        # Si ce projet n'existe pas encore, dis-le moi et je le prépare.
+ 
+      - name: Download arm64-v8a binary
+        uses: actions/download-artifact@v4
+        with:
+          name: spd_dump-arm64-v8a
+          path: app/src/main/jniLibs/arm64-v8a
+ 
+      - name: Download armeabi-v7a binary
+        uses: actions/download-artifact@v4
+        with:
+          name: spd_dump-armeabi-v7a
+          path: app/src/main/jniLibs/armeabi-v7a
+ 
+      - name: Rename binaries to lib*.so (requis par Android pour jniLibs)
+        run: |
+          mv app/src/main/jniLibs/arm64-v8a/spd_dump \
+             app/src/main/jniLibs/arm64-v8a/libspd_dump.so
+          mv app/src/main/jniLibs/armeabi-v7a/spd_dump \
+             app/src/main/jniLibs/armeabi-v7a/libspd_dump.so
+ 
+      - name: Set up JDK
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+ 
+      - name: Build debug APK
+        run: |
+          chmod +x ./gradlew
+          ./gradlew assembleDebug
+ 
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: spdhost-app-debug
+          path: app/build/outputs/apk/debug/*.apk
+ 
