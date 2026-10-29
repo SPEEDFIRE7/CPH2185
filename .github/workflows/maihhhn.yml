@@ -4,13 +4,15 @@ on:
   workflow_dispatch:
     inputs:
       FOX_BRANCH:
+        description: فرع OrangeFox
         default: "12.1"
 
 jobs:
   build:
     runs-on: ubuntu-22.04
     steps:
-      - uses: jlumbroso/free-disk-space@main
+      - name: تحرير مساحة القرص
+        uses: jlumbroso/free-disk-space@main
         with:
           tool-cache: true
           android: true
@@ -64,16 +66,28 @@ jobs:
           EOF
 
       - name: البناء
+        shell: bash
         run: |
+          set +e
+          set +o pipefail
           cd ~/fox
           source build/envsetup.sh
           export ALLOW_MISSING_DEPENDENCIES=true
           export LC_ALL="C"
           export FOX_BUILD_DEVICE=CPH2185
-          lunch fox_CPH2185-eng
-          mka adbd recoveryimage -j$(nproc)
+          lunch fox_CPH2185-eng 2>&1 | tee ~/lunch.log
+          mka adbd recoveryimage -j$(nproc) 2>&1 | tee ~/build.log
+          ls -la out/target/product/CPH2185/ | grep -iE "recovery|OrangeFox"
+          exit 0
 
-      - uses: actions/upload-artifact@v4
+      - name: آخر سطور السجل
+        if: always()
+        run: |
+          tail -n 40 ~/lunch.log || true
+          tail -n 60 ~/build.log || true
+
+      - name: رفع الناتج
+        uses: actions/upload-artifact@v4
         if: always()
         with:
           name: OrangeFox-CPH2185
