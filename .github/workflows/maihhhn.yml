@@ -1,0 +1,82 @@
+name: Build OrangeFox CPH2185
+
+on:
+  workflow_dispatch:
+    inputs:
+      FOX_BRANCH:
+        default: "12.1"
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: jlumbroso/free-disk-space@main
+        with:
+          tool-cache: true
+          android: true
+          dotnet: true
+          haskell: true
+          large-packages: false
+
+      - name: الأدوات
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y git-core gnupg flex bison build-essential zip curl \
+            zlib1g-dev libc6-dev-i386 libncurses5 lib32ncurses-dev x11proto-core-dev \
+            libx11-dev lib32z1-dev libgl1-mesa-dev libxml2-utils xsltproc unzip \
+            fontconfig python3 python-is-python3 rsync bc ccache
+          mkdir -p ~/bin
+          curl -s https://storage.googleapis.com/git-repo-downloads/repo > ~/bin/repo
+          chmod a+x ~/bin/repo
+          echo "$HOME/bin" >> $GITHUB_PATH
+          git config --global user.name "builder"
+          git config --global user.email "builder@example.com"
+
+      - name: مزامنة OrangeFox
+        run: |
+          export PATH="$HOME/bin:$PATH"
+          git clone https://gitlab.com/OrangeFox/sync.git ~/sync
+          cd ~/sync
+          ./orangefox_sync.sh --branch ${{ inputs.FOX_BRANCH }} --path ~/fox
+
+      - name: الشجرة
+        run: |
+          cd ~/fox
+          git clone -b twrp-12.1 https://github.com/melekpro/android_recovery_oppo_CPH2185 device/OPPO/CPH2185
+          cd device/OPPO/CPH2185
+          ls prebuilt prebuilt/dtb || true
+
+          mv twrp_CPH2185.mk fox_CPH2185.mk
+          sed -i 's/twrp_CPH2185/fox_CPH2185/g' AndroidProducts.mk fox_CPH2185.mk
+
+          cat > vendorsetup.sh <<'EOF'
+          export ALLOW_MISSING_DEPENDENCIES=true
+          export LC_ALL="C"
+          export FOX_BUILD_DEVICE=CPH2185
+          export FOX_VARIANT=stock
+          export OF_USE_GREEN_LED=0
+          export FOX_USE_BASH_SHELL=1
+          export FOX_ASH_IS_BASH=1
+          export FOX_USE_TAR_BINARY=1
+          export FOX_USE_SED_BINARY=1
+          export FOX_USE_XZ_UTILS=1
+          export FOX_DELETE_AROMAFM=1
+          EOF
+
+      - name: البناء
+        run: |
+          cd ~/fox
+          source build/envsetup.sh
+          export ALLOW_MISSING_DEPENDENCIES=true
+          export LC_ALL="C"
+          export FOX_BUILD_DEVICE=CPH2185
+          lunch fox_CPH2185-eng
+          mka adbd recoveryimage -j$(nproc)
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: OrangeFox-CPH2185
+          path: |
+            ~/fox/out/target/product/CPH2185/OrangeFox*.zip
+            ~/fox/out/target/product/CPH2185/recovery.img
