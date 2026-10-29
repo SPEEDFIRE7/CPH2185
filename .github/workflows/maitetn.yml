@@ -1,0 +1,125 @@
+name: Recovery Preview (Oppo A15 / CPH2185)
+
+on:
+  workflow_dispatch:
+    inputs:
+      recovery_url:
+        description: "رابط مباشر لـ recovery.img أو معرّف ملف PixelDrain"
+        required: true
+        type: string
+      run_qemu:
+        description: "محاولة التشغيل في QEMU (تجريبي)"
+        required: false
+        default: true
+        type: boolean
+
+jobs:
+  preview:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Install tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y qemu-system-arm imagemagick lz4 xz-utils cpio socat file git python3 curl
+
+      - name: Download recovery.img
+        env:
+          INPUT_URL: ${{ inputs.recovery_url }}
+        run: |
+          set -e
+          URL="$INPUT_URL"
+          case "$URL" in
+            http*) ;;
+            *) URL="https://pixeldrain.com/api/file/$URL" ;;
+          esac
+          curl -L --fail -o recovery.img "$URL"
+          ls -l recovery.img
+          file recovery.img
+          mkdir -p out
+
+      - name: Unpack recovery.img
+        run: |
+          set -e
+          git clone --depth 1 https://android.googlesource.com/platform/system/tools/mkbootimg mkbootimg
+          python3 mkbootimg/unpack_bootimg.py --boot_img recovery.img --out unpacked | tee out/unpack.log
+          ls -l unpacked
+          python3 - <<'PY'
+          # إزالة ترويسة MTK (512 بايت) إن وُجدت
+          for p in ("unpacked/kernel", "unpacked/ramdisk"):
+              try:
+                  d = open(p, "rb").read()
+              except FileNotFoundError:
+                  continue
+              if int.from_bytes(d[:4], "little") == 0x88168858:
+                  open(p, "wb").write(d[512:])
+                  print("MTK header stripped:", p)
+          PY
+
+      - name: Extract ramdisk
+        run: |
+          set -e
+          mkdir ramdisk_files
+          cd ramdisk_files
+          T="$(file -b ../unpacked/ramdisk)"
+          echo "ramdisk type: $T"
+          case "$T" in
+            *gzip*)  gzip -dc ../unpacked/ramdisk | cpio -idm || true ;;
+            *LZ4*)   lz4 -dc ../unpacked/ramdisk | cpio -idm || true ;;
+            *XZ*)    xz -dc ../unpacked/ramdisk | cpio -idm || true ;;
+            *bzip2*) bzip2 -dc ../unpacked/ramdisk | cpio -idm || true ;;
+            *cpio*)  cpio -idm < ../unpacked/ramdisk || true ;;
+            *) echo "Unknown ramdisk format"; exit 1 ;;
+          esac
+          cd ..
+          find ramdisk_files -maxdepth 2 | head -n 80 | tee out/ramdisk_tree.txt
+
+      - name: Theme info and contact sheet
+        run: |
+          set +e
+          {
+            echo "## Recovery info"
+            grep -rhE "ro.(product|build|orangefox|twrp|omni)" ramdisk_files/*.prop ramdisk_files/default.prop 2>/dev/null | head -n 30
+            echo "## Theme folders"
+            find ramdisk_files -maxdepth 3 -type d \( -name twres -o -name FFiles \)
+          } | tee out/info.txt >> "$GITHUB_STEP_SUMMARY"
+
+          find ramdisk_files \( -path '*/twres/*' -o -path '*/FFiles/*' \) -name '*.png' | sort | head -n 80 > imgs.txt
+          wc -l imgs.txt
+          if [ -s imgs.txt ]; then
+            montage @imgs.txt -background '#222222' -geometry 160x160+6+6 -tile 8x out/theme_contact_sheet.png
+          fi
+          cp -r ramdisk_files/twres out/twres 2>/dev/null
+          cp -r ramdisk_files/FFiles out/FFiles 2>/dev/null
+          ls -lh out
+
+      - name: QEMU boot attempt (experimental)
+        if: ${{ inputs.run_qemu }}
+        continue-on-error: true
+        run: |
+          set +e
+          K=unpacked/kernel
+          if file -b "$K" | grep -qi gzip; then gzip -dc "$K" > Image; else cp "$K" Image; fi
+          file Image
+
+          qemu-system-aarch64 -M virt -cpu cortex-a53 -m 1024 -smp 2 \
+            -kernel Image -initrd unpacked/ramdisk \
+            -append "console=ttyAMA0 earlycon androidboot.hardware=mt6765 androidboot.selinux=permissive" \
+            -device virtio-gpu-pci -vnc 127.0.0.1:1 \
+            -monitor unix:/tmp/qmon,server,nowait \
+            -serial file:out/qemu_serial.log &
+          QPID=$!
+
+          sleep 90
+          echo "screendump /tmp/shot.ppm" | socat - UNIX-CONNECT:/tmp/qmon
+          sleep 3
+          convert /tmp/shot.ppm out/qemu_screen.png
+          echo "quit" | socat - UNIX-CONNECT:/tmp/qmon
+          kill $QPID 2>/dev/null
+          tail -n 40 out/qemu_serial.log
+
+      - name: Upload results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: recovery-preview
+          path: out/
