@@ -51,6 +51,15 @@ jobs:
           mv twrp_CPH2185.mk fox_CPH2185.mk
           sed -i 's/twrp_CPH2185/fox_CPH2185/g' AndroidProducts.mk fox_CPH2185.mk
 
+          # إصلاح اختيار الثيم: تحديد أبعاد الشاشة
+          cat >> BoardConfig.mk <<'EOF'
+
+          # Screen (Fox theme selection)
+          TARGET_SCREEN_WIDTH := 720
+          TARGET_SCREEN_HEIGHT := 1600
+          DEVICE_RESOLUTION := 720x1600
+          EOF
+
           cat > vendorsetup.sh <<'EOF'
           export ALLOW_MISSING_DEPENDENCIES=true
           export LC_ALL="C"
@@ -77,20 +86,49 @@ jobs:
           export FOX_BUILD_DEVICE=CPH2185
           lunch fox_CPH2185-eng 2>&1 | tee ~/lunch.log
           mka adbd recoveryimage -j$(nproc) 2>&1 | tee ~/build.log
-          ls -la out/target/product/CPH2185/ | grep -iE "recovery|OrangeFox"
+          OUT=out/target/product/CPH2185
+          ls -la $OUT | grep -iE "recovery|OrangeFox"
+          if ls $OUT/OrangeFox*.zip $OUT/recovery.img >/dev/null 2>&1; then
+            echo "BUILD_OK=1" >> $GITHUB_ENV
+          else
+            echo "BUILD_OK=0" >> $GITHUB_ENV
+          fi
           exit 0
 
-      - name: آخر سطور السجل
+      - name: سجل الأخطاء
         if: always()
         run: |
+          echo "=== قبل خطأ الثيم ==="
+          grep -n -B25 "theme selection failed" ~/lunch.log ~/build.log | head -60 || true
+          echo "=== آخر سطور lunch ==="
           tail -n 40 ~/lunch.log || true
+          echo "=== آخر سطور build ==="
           tail -n 60 ~/build.log || true
 
-      - name: رفع الناتج
+      - name: رفع إلى Gofile
+        if: always()
+        run: |
+          OUT=~/fox/out/target/product/CPH2185
+          for f in $OUT/OrangeFox*.zip $OUT/recovery.img; do
+            [ -f "$f" ] || continue
+            echo "رفع: $f"
+            curl -s -F "file=@$f" https://upload.gofile.io/uploadfile | tee ~/gofile.json
+            echo
+            grep -o '"downloadPage":"[^"]*"' ~/gofile.json || true
+          done
+
+      - name: رفع كـ Artifact
         uses: actions/upload-artifact@v4
         if: always()
         with:
           name: OrangeFox-CPH2185
+          if-no-files-found: warn
           path: |
             ~/fox/out/target/product/CPH2185/OrangeFox*.zip
             ~/fox/out/target/product/CPH2185/recovery.img
+
+      - name: فشل إن لم يُنتج ملف
+        if: env.BUILD_OK != '1'
+        run: |
+          echo "لم يتم إنتاج الريكفري"
+          exit 1
