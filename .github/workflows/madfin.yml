@@ -4,12 +4,16 @@ on:
   workflow_dispatch:
     inputs:
       lk_url:
-        description: "Lien direct du fichier lk (ex: https://pixeldrain.com/api/file/ID)"
+        description: "Lien DIRECT du fichier lk (ex: https://pixeldrain.com/api/file/ID)"
         required: true
       lk_size:
         description: "Taille du code LK (octets, depuis l'en-tête)"
         required: true
         default: "3955398"
+      file_size:
+        description: "Taille attendue du fichier complet lk.img"
+        required: true
+        default: "4084144"
       base_addr:
         description: "Adresse de base"
         required: true
@@ -25,10 +29,17 @@ jobs:
           distribution: temurin
           java-version: "21"
 
-      - name: Télécharger le LK et enlever l'en-tête MTK (512 octets)
+      - name: Télécharger le LK et vérifier la taille
         run: |
-          curl -L -o lk.img "${{ github.event.inputs.lk_url }}"
-          ls -l lk.img
+          curl -fL -o lk.img "${{ github.event.inputs.lk_url }}"
+          SIZE=$(stat -c %s lk.img)
+          echo "Taille téléchargée: $SIZE octets (attendu: ${{ github.event.inputs.file_size }})"
+          if [ "$SIZE" != "${{ github.event.inputs.file_size }}" ]; then
+            echo "ERREUR: le fichier téléchargé n'est pas le bon. Le lien n'est probablement pas un lien direct."
+            echo "Début du fichier reçu:"
+            head -c 300 lk.img
+            exit 1
+          fi
           tail -c +513 lk.img | head -c ${{ github.event.inputs.lk_size }} > lk.bin
           ls -l lk.bin
 
