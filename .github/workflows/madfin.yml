@@ -1,4 +1,4 @@
-name: Analyse LK Oppo A15 (appelant du menu boot)
+name: Analyse LK Oppo A15 (donnees patch final)
 
 on:
   workflow_dispatch:
@@ -7,11 +7,9 @@ on:
         description: "Lien DIRECT du fichier lk"
         required: true
       lk_size:
-        description: "Taille du code LK"
         required: true
         default: "3955398"
       file_size:
-        description: "Taille attendue du fichier complet"
         required: true
         default: "4084144"
       base_addr:
@@ -33,8 +31,7 @@ jobs:
           curl -fL -o lk.img "${{ github.event.inputs.lk_url }}"
           SIZE=$(stat -c %s lk.img)
           if [ "$SIZE" != "${{ github.event.inputs.file_size }}" ]; then
-            echo "ERREUR: taille incorrecte ($SIZE)"
-            exit 1
+            echo "ERREUR: taille incorrecte ($SIZE)"; exit 1
           fi
           tail -c +513 lk.img | head -c ${{ github.event.inputs.lk_size }} > lk.bin
 
@@ -57,9 +54,7 @@ jobs:
           out = open("/tmp/report.txt", "w")
 
           def log(s):
-              out.write(s + "\n")
-              out.flush()
-              print(s)
+              out.write(s + "\n"); out.flush(); print(s)
 
           try:
               prog = currentProgram
@@ -70,57 +65,61 @@ jobs:
               ctx.setValue(tm, toAddr(BASE + 0x100), mem.getMaxAddress(), BigInteger.ONE)
 
               seeds = [0x48026a8c, 0x48027408, 0x480218c4, 0x480215cc, 0x480216a0,
-                       0x4802e5ec, 0x4802e720, 0x4802e7b4]
+                       0x4802e5ec, 0x4802e720, 0x4802e7b4, 0x4802ea84, 0x4802e960,
+                       0x480050ec, 0x480223bc, 0x480225d0]
               for a in seeds:
                   disassemble(toAddr(a))
                   if fm.getFunctionAt(toAddr(a)) is None:
                       createFunction(toAddr(a), None)
-
               analyzeAll(prog)
               log("fonctions: %d" % fm.getFunctionCount())
 
-              refman = prog.getReferenceManager()
-              di = DecompInterface()
-              di.openProgram(prog)
-              mon = ConsoleTaskMonitor()
+              di = DecompInterface(); di.openProgram(prog); mon = ConsoleTaskMonitor()
 
-              def dec(f):
-                  r = di.decompileFunction(f, 180, mon)
-                  if r.decompileCompleted():
-                      return r.getDecompiledFunction().getC()
-                  return "ECHEC DECOMPILATION"
+              # 1) Désassemblage brut (hex + mnémonique) de FUN_4802ea84 en entier
+              f = fm.getFunctionAt(toAddr(0x4802ea84))
+              log("=" * 70)
+              log("DESASSEMBLAGE BRUT FUN_4802ea84")
+              listing = prog.getListing()
+              instr = listing.getInstructionAt(f.getEntryPoint())
+              end = f.getBody().getMaxAddress()
+              while instr is not None and instr.getAddress() <= end:
+                  b = instr.getBytes()
+                  log("%s  %s  %s" % (instr.getAddress(), ''.join('%02x' % (x & 0xff) for x in b), instr.toString()))
+                  instr = instr.getNext()
 
-              # Trouver et decompiler TOUTES les fonctions qui appellent les 3 ecrans de menu
-              callers = set()
-              for target in (0x4802e5ec, 0x4802e720, 0x4802e7b4):
-                  f = fm.getFunctionAt(toAddr(target))
-                  if f is None:
-                      log("pas de fonction a 0x%x" % target)
-                      continue
-                  refs = refman.getReferencesTo(f.getEntryPoint())
-                  for r in refs:
-                      cf = fm.getFunctionContaining(r.getFromAddress())
-                      if cf is not None:
-                          callers.add(cf)
+              # 2) Desassemblage brut de fastboot_register autour de la creation du thread
+              log("=" * 70)
+              log("DESASSEMBLAGE BRUT autour de 0x48027800-0x48027890 (creation thread fastboot)")
+              a = toAddr(0x48027800)
+              endA = toAddr(0x48027895)
+              instr = listing.getInstructionAt(a)
+              if instr is None:
+                  instr = listing.getInstructionContaining(a)
+              while instr is not None and instr.getAddress() <= endA:
+                  b = instr.getBytes()
+                  log("%s  %s  %s" % (instr.getAddress(), ''.join('%02x' % (x & 0xff) for x in b), instr.toString()))
+                  instr = instr.getNext()
 
-              log("Appelants trouves: %s" % [str(c.getEntryPoint()) for c in callers])
-              for c in callers:
-                  log("=" * 70)
-                  log("APPELANT : %s @ %s (offset fichier 0x%x)" % (c.getName(), c.getEntryPoint(), c.getEntryPoint().getOffset() - BASE + 0x200))
-                  log(dec(c))
+              # 3) Chercher une zone de 0x00 (code cave) pres de la fin du code
+              log("=" * 70)
+              log("RECHERCHE CODE CAVE (octets 0x00 consecutifs)")
+              block = mem.getBlock(toAddr(BASE))
+              arr = bytearray(block.getSize())
+              block.getBytes(block.getStart(), arr)
+              run_start = None
+              best = []
+              for i in range(len(arr)):
+                  if arr[i] == 0:
+                      if run_start is None:
+                          run_start = i
+                  else:
+                      if run_start is not None and i - run_start > 200:
+                          best.append((run_start, i - run_start))
+                      run_start = None
+              for s, l in best[-10:]:
+                  log("cave @ 0x%x (offset fichier 0x%x) longueur %d" % (BASE + s, s + 0x200, l))
 
-              # Aussi: fonctions appelees PAR ce(s) appelant(s) (pour trouver la lecture de touches)
-              done = set()
-              for c in list(callers):
-                  insns = currentProgram.getListing().getInstructions(c.getBody(), True)
-                  for ins in insns:
-                      for r in ins.getReferencesFrom():
-                          tf = fm.getFunctionAt(r.getToAddress())
-                          if tf is not None and tf not in callers and tf.getEntryPoint() not in done:
-                              done.add(tf.getEntryPoint())
-                              log("=" * 70)
-                              log("SOUS-FONCTION APPELEE : %s @ %s (offset fichier 0x%x)" % (tf.getName(), tf.getEntryPoint(), tf.getEntryPoint().getOffset() - BASE + 0x200))
-                              log(dec(tf))
               log("FIN")
           except Exception:
               log("ERREUR FATALE\n%s" % traceback.format_exc())
