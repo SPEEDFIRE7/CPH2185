@@ -42,6 +42,7 @@ jobs:
         run: |
           cat > lk_report.py <<'PYEOF'
           # -*- coding: utf-8 -*-
+          import traceback
           from java.math import BigInteger
           from ghidra.app.decompiler import DecompInterface
           from ghidra.util.task import ConsoleTaskMonitor
@@ -51,80 +52,100 @@ jobs:
 
           def log(s):
               out.write(s + "\n")
+              out.flush()
               print(s)
 
-          prog = currentProgram
-          mem = prog.getMemory()
-          fm = prog.getFunctionManager()
-          ctx = prog.getProgramContext()
-          tm = ctx.getRegister("TMode")
-          ctx.setValue(tm, toAddr(BASE + 0x100), mem.getMaxAddress(), BigInteger.ONE)
+          try:
+              log("DEBUT ANALYSE")
+              prog = currentProgram
+              mem = prog.getMemory()
+              fm = prog.getFunctionManager()
+              ctx = prog.getProgramContext()
+              log("Langage: %s" % prog.getLanguageID())
+              log("Plage memoire: %s -> %s" % (mem.getMinAddress(), mem.getMaxAddress()))
+              tm = ctx.getRegister("TMode")
+              ctx.setValue(tm, toAddr(BASE + 0x100), mem.getMaxAddress(), BigInteger.ONE)
+              log("TMode applique")
 
-          def hw(o):
-              return mem.getShort(toAddr(BASE + o)) & 0xffff
+              def hw(o):
+                  b0 = mem.getByte(toAddr(BASE + o)) & 0xff
+                  b1 = mem.getByte(toAddr(BASE + o + 1)) & 0xff
+                  return b0 | (b1 << 8)
 
-          def find_start(off):
-              o = off
-              while o > off - 0x800:
-                  h = hw(o)
-                  if (h & 0xff00) == 0xb500:
-                      return o
-                  if h == 0xe92d and (hw(o + 2) & 0x4000):
-                      return o
-                  o -= 2
-              return off
+              def find_start(off):
+                  o = off
+                  while o > off - 0x800:
+                      h = hw(o)
+                      if (h & 0xff00) == 0xb500:
+                          return o
+                      if h == 0xe92d and (hw(o + 2) & 0x4000):
+                          return o
+                      o -= 2
+                  return off
 
-          for off in (0x26a8c, 0x2196c, 0x27740, 0x215e0, 0x216d0):
-              st = find_start(off)
-              disassemble(toAddr(BASE + st))
-              if fm.getFunctionAt(toAddr(BASE + st)) is None:
-                  createFunction(toAddr(BASE + st), None)
+              for off in (0x26a8c, 0x2196c, 0x27740, 0x215e0, 0x216d0):
+                  st = find_start(off)
+                  log("seed 0x%x -> debut fonction 0x%x" % (off, st))
+                  disassemble(toAddr(BASE + st))
+                  if fm.getFunctionAt(toAddr(BASE + st)) is None:
+                      createFunction(toAddr(BASE + st), None)
 
-          analyzeAll(prog)
+              log("Lancement analyzeAll")
+              analyzeAll(prog)
+              log("analyzeAll termine, fonctions: %d" % fm.getFunctionCount())
 
-          di = DecompInterface()
-          di.openProgram(prog)
-          mon = ConsoleTaskMonitor()
+              di = DecompInterface()
+              di.openProgram(prog)
+              mon = ConsoleTaskMonitor()
 
-          def dec(f):
-              r = di.decompileFunction(f, 180, mon)
-              if r.decompileCompleted():
-                  return r.getDecompiledFunction().getC()
-              return "ECHEC DECOMPILATION"
+              def dec(f):
+                  r = di.decompileFunction(f, 180, mon)
+                  if r.decompileCompleted():
+                      return r.getDecompiledFunction().getC()
+                  return "ECHEC DECOMPILATION"
 
-          done = set()
+              done = set()
 
-          def dump(title, f):
-              if f is None or f.getEntryPoint() in done:
-                  return
-              done.add(f.getEntryPoint())
+              def dump(title, f):
+                  if f is None or f.getEntryPoint() in done:
+                      return
+                  done.add(f.getEntryPoint())
+                  log("=" * 70)
+                  log("%s : %s @ %s (offset fichier 0x%x)" % (title, f.getName(), f.getEntryPoint(), f.getEntryPoint().getOffset() - BASE + 0x200))
+                  log(dec(f))
+
+              for off, name in ((0x26a8c, "fastboot_register"), (0x27776, "enregistrement des commandes"), (0x217e6, "ecriture misc (boot-fastboot)"), (0x218d4, "ecriture misc (boot-recovery)"), (0x2196c, "appel apres enregistrement")):
+                  try:
+                      dump(name, fm.getFunctionContaining(toAddr(BASE + off)))
+                  except Exception:
+                      log("ERREUR dump %s\n%s" % (name, traceback.format_exc()))
+
               log("=" * 70)
-              log("%s : %s @ %s (offset fichier 0x%x)" % (title, f.getName(), f.getEntryPoint(), f.getEntryPoint().getOffset() - BASE + 0x200))
-              log(dec(f))
-
-          for off, name in ((0x26a8c, "fastboot_register"), (0x27776, "enregistrement des commandes"), (0x217e6, "ecriture misc (boot-fastboot)"), (0x218d4, "ecriture misc (boot-recovery)"), (0x2196c, "appel apres enregistrement")):
-              dump(name, fm.getFunctionContaining(toAddr(BASE + off)))
-
-          log("=" * 70)
-          log("CHAINES LIEES AUX BOUTONS")
-          n = 0
-          for d in prog.getListing().getDefinedData(True):
-              if not d.hasStringValue():
-                  continue
-              v = str(d.getValue())
-              lv = v.lower()
-              if ("key" in lv or "volume" in lv or "vol" in lv) and len(v) < 80:
-                  refs = prog.getReferenceManager().getReferencesTo(d.getAddress())
-                  fs = []
-                  for r in refs:
-                      f = fm.getFunctionContaining(r.getFromAddress())
-                      if f is not None:
-                          fs.append(f)
-                  log("%s  %r  <- %s" % (d.getAddress(), v, [str(f.getEntryPoint()) for f in fs]))
-                  for f in fs:
-                      if n < 8:
-                          dump("fonction touches", f)
-                          n += 1
+              log("CHAINES LIEES AUX BOUTONS")
+              n = 0
+              for d in prog.getListing().getDefinedData(True):
+                  try:
+                      if not d.hasStringValue():
+                          continue
+                      v = str(d.getValue())
+                      lv = v.lower()
+                      if ("key" in lv or "volume" in lv or "vol" in lv) and len(v) < 80:
+                          refs = prog.getReferenceManager().getReferencesTo(d.getAddress())
+                          fs = []
+                          for r in refs:
+                              f = fm.getFunctionContaining(r.getFromAddress())
+                              if f is not None:
+                                  fs.append(f)
+                          log("%s  %r  <- %s" % (d.getAddress(), v, [str(f.getEntryPoint()) for f in fs]))
+                          for f in fs:
+                              if n < 8:
+                                  dump("fonction touches", f)
+                                  n += 1
+                  except Exception:
+                      log("ERREUR chaine\n%s" % traceback.format_exc())
+              log("FIN ANALYSE")
+          except Exception:
+              log("ERREUR FATALE\n%s" % traceback.format_exc())
           out.close()
           PYEOF
 
@@ -138,12 +159,19 @@ jobs:
             -loader-baseAddr "${{ github.event.inputs.base_addr }}" \
             -noanalysis \
             -scriptPath "$PWD" \
-            -postScript lk_report.py
+            -postScript lk_report.py 2>&1 | tee ghidra.log
 
       - name: Afficher le rapport
-        run: head -c 60000 /tmp/report.txt || true
+        if: always()
+        run: |
+          ls -l /tmp/report.txt || true
+          head -c 60000 /tmp/report.txt || true
+          cp /tmp/report.txt . || true
 
       - uses: actions/upload-artifact@v4
+        if: always()
         with:
           name: lk-report
-          path: /tmp/report.txt
+          path: |
+            report.txt
+            ghidra.log
