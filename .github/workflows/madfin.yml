@@ -1,25 +1,20 @@
-name: Analyse LK Oppo A15 (fonctions)
+name: Analyse LK Oppo A15 (appelant du menu boot)
 
 on:
   workflow_dispatch:
     inputs:
       lk_url:
-        description: "Lien DIRECT du fichier lk (ex: https://pixeldrain.com/api/file/ID)"
+        description: "Lien DIRECT du fichier lk"
         required: true
-      funcs:
-        description: "Adresses des fonctions à décompiler (séparées par des virgules)"
-        required: true
-        default: "0x4802810c,0x48028148,0x4802851c,0x480284ec,0x48027ed0,0x480050ec,0x480223bc,0x480225d0,0x48004e4c,0x4802e5ec,0x4802e720,0x4802e7b4"
       lk_size:
-        description: "Taille du code LK (octets, depuis l'en-tête)"
+        description: "Taille du code LK"
         required: true
         default: "3955398"
       file_size:
-        description: "Taille attendue du fichier complet lk.img"
+        description: "Taille attendue du fichier complet"
         required: true
         default: "4084144"
       base_addr:
-        description: "Adresse de base"
         required: true
         default: "0x48000000"
 
@@ -37,14 +32,11 @@ jobs:
         run: |
           curl -fL -o lk.img "${{ github.event.inputs.lk_url }}"
           SIZE=$(stat -c %s lk.img)
-          echo "Taille téléchargée: $SIZE octets (attendu: ${{ github.event.inputs.file_size }})"
           if [ "$SIZE" != "${{ github.event.inputs.file_size }}" ]; then
-            echo "ERREUR: le fichier téléchargé n'est pas le bon."
-            head -c 300 lk.img
+            echo "ERREUR: taille incorrecte ($SIZE)"
             exit 1
           fi
           tail -c +513 lk.img | head -c ${{ github.event.inputs.lk_size }} > lk.bin
-          ls -l lk.bin
 
       - name: Télécharger Ghidra
         run: |
@@ -56,7 +48,6 @@ jobs:
         run: |
           cat > lk_report.py <<'PYEOF'
           # -*- coding: utf-8 -*-
-          import os
           import traceback
           from java.math import BigInteger
           from ghidra.app.decompiler import DecompInterface
@@ -71,7 +62,6 @@ jobs:
               print(s)
 
           try:
-              log("DEBUT ANALYSE")
               prog = currentProgram
               mem = prog.getMemory()
               fm = prog.getFunctionManager()
@@ -79,50 +69,65 @@ jobs:
               tm = ctx.getRegister("TMode")
               ctx.setValue(tm, toAddr(BASE + 0x100), mem.getMaxAddress(), BigInteger.ONE)
 
-              funcs = [int(x.strip(), 16) & ~1 for x in os.environ.get("FUNCS", "").split(",") if x.strip()]
-              log("Fonctions demandees: %s" % [hex(x) for x in funcs])
+              seeds = [0x48026a8c, 0x48027408, 0x480218c4, 0x480215cc, 0x480216a0,
+                       0x4802e5ec, 0x4802e720, 0x4802e7b4]
+              for a in seeds:
+                  disassemble(toAddr(a))
+                  if fm.getFunctionAt(toAddr(a)) is None:
+                      createFunction(toAddr(a), None)
 
-              seeds = [0x48026a8c, 0x48027408, 0x480218c4, 0x480215cc, 0x480216a0]
-              for a in seeds + funcs:
-                  try:
-                      disassemble(toAddr(a))
-                      if fm.getFunctionAt(toAddr(a)) is None:
-                          createFunction(toAddr(a), None)
-                  except Exception:
-                      log("seed %x: %s" % (a, traceback.format_exc()))
-
-              log("Lancement analyzeAll")
               analyzeAll(prog)
-              log("analyzeAll termine, fonctions: %d" % fm.getFunctionCount())
+              log("fonctions: %d" % fm.getFunctionCount())
 
+              refman = prog.getReferenceManager()
               di = DecompInterface()
               di.openProgram(prog)
               mon = ConsoleTaskMonitor()
 
-              for a in funcs:
-                  try:
-                      f = fm.getFunctionContaining(toAddr(a))
-                      log("=" * 70)
-                      if f is None:
-                          log("Aucune fonction a 0x%x" % a)
-                          continue
-                      log("FONCTION demandee 0x%x -> %s @ %s (offset fichier 0x%x)" % (a, f.getName(), f.getEntryPoint(), f.getEntryPoint().getOffset() - BASE + 0x200))
-                      r = di.decompileFunction(f, 180, mon)
-                      if r.decompileCompleted():
-                          log(r.getDecompiledFunction().getC())
-                      else:
-                          log("ECHEC DECOMPILATION")
-                  except Exception:
-                      log("ERREUR %x\n%s" % (a, traceback.format_exc()))
-              log("FIN ANALYSE")
+              def dec(f):
+                  r = di.decompileFunction(f, 180, mon)
+                  if r.decompileCompleted():
+                      return r.getDecompiledFunction().getC()
+                  return "ECHEC DECOMPILATION"
+
+              # Trouver et decompiler TOUTES les fonctions qui appellent les 3 ecrans de menu
+              callers = set()
+              for target in (0x4802e5ec, 0x4802e720, 0x4802e7b4):
+                  f = fm.getFunctionAt(toAddr(target))
+                  if f is None:
+                      log("pas de fonction a 0x%x" % target)
+                      continue
+                  refs = refman.getReferencesTo(f.getEntryPoint())
+                  for r in refs:
+                      cf = fm.getFunctionContaining(r.getFromAddress())
+                      if cf is not None:
+                          callers.add(cf)
+
+              log("Appelants trouves: %s" % [str(c.getEntryPoint()) for c in callers])
+              for c in callers:
+                  log("=" * 70)
+                  log("APPELANT : %s @ %s (offset fichier 0x%x)" % (c.getName(), c.getEntryPoint(), c.getEntryPoint().getOffset() - BASE + 0x200))
+                  log(dec(c))
+
+              # Aussi: fonctions appelees PAR ce(s) appelant(s) (pour trouver la lecture de touches)
+              done = set()
+              for c in list(callers):
+                  insns = currentProgram.getListing().getInstructions(c.getBody(), True)
+                  for ins in insns:
+                      for r in ins.getReferencesFrom():
+                          tf = fm.getFunctionAt(r.getToAddress())
+                          if tf is not None and tf not in callers and tf.getEntryPoint() not in done:
+                              done.add(tf.getEntryPoint())
+                              log("=" * 70)
+                              log("SOUS-FONCTION APPELEE : %s @ %s (offset fichier 0x%x)" % (tf.getName(), tf.getEntryPoint(), tf.getEntryPoint().getOffset() - BASE + 0x200))
+                              log(dec(tf))
+              log("FIN")
           except Exception:
               log("ERREUR FATALE\n%s" % traceback.format_exc())
           out.close()
           PYEOF
 
       - name: Lancer Ghidra (headless)
-        env:
-          FUNCS: ${{ github.event.inputs.funcs }}
         run: |
           mkdir -p proj
           ./ghidra/support/analyzeHeadless proj lkproj \
@@ -137,7 +142,6 @@ jobs:
       - name: Afficher le rapport
         if: always()
         run: |
-          ls -l /tmp/report.txt || true
           head -c 60000 /tmp/report.txt || true
           cp /tmp/report.txt . || true
 
