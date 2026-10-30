@@ -1,4 +1,4 @@
-name: Analyse LK Oppo A15 (donnees patch final)
+name: Patch LK Oppo A15 - Boutons Vol Up/Down (Stage 1 - test sans reboot)
 
 on:
   workflow_dispatch:
@@ -12,142 +12,57 @@ on:
       file_size:
         required: true
         default: "4084144"
-      base_addr:
-        required: true
-        default: "0x48000000"
 
 jobs:
-  analyse:
+  patch:
     runs-on: ubuntu-latest
-    timeout-minutes: 60
     steps:
-      - uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: "21"
-
       - name: Télécharger le LK et vérifier la taille
         run: |
           curl -fL -o lk.img "${{ github.event.inputs.lk_url }}"
           SIZE=$(stat -c %s lk.img)
           if [ "$SIZE" != "${{ github.event.inputs.file_size }}" ]; then
-            echo "ERREUR: taille incorrecte ($SIZE)"; exit 1
+            echo "ERREUR: taille incorrecte ($SIZE, attendu ${{ github.event.inputs.file_size }})"
+            exit 1
           fi
-          tail -c +513 lk.img | head -c ${{ github.event.inputs.lk_size }} > lk.bin
 
-      - name: Télécharger Ghidra
+      - name: Appliquer le patch
         run: |
-          curl -L -o ghidra.zip "https://github.com/NationalSecurityAgency/ghidra/releases/download/Ghidra_11.2.1_build/ghidra_11.2.1_PUBLIC_20241105.zip"
-          unzip -q ghidra.zip
-          mv ghidra_11.2.1_PUBLIC ghidra
+          python3 - <<'PYEOF'
+          import struct
 
-      - name: Écrire le script d'analyse
-        run: |
-          cat > lk_report.py <<'PYEOF'
-          # -*- coding: utf-8 -*-
-          import traceback
-          from java.math import BigInteger
-          from ghidra.app.decompiler import DecompInterface
-          from ghidra.util.task import ConsoleTaskMonitor
+          with open("lk.img", "rb") as f:
+              data = bytearray(f.read())
 
-          BASE = 0x48000000
-          out = open("/tmp/report.txt", "w")
+          expected_size = ${{ github.event.inputs.file_size }}
+          assert len(data) == expected_size, "taille inattendue"
 
-          def log(s):
-              out.write(s + "\n"); out.flush(); print(s)
+          HOOK_OFFSET  = 162374
+          CAVE_OFFSET  = 666426
+          HOOK_ORIG    = bytes.fromhex("204604b0")
+          HOOK_NEW     = bytes.fromhex("7bf0aef8")
+          CAVE_BYTES   = bytes.fromhex("10b50f4c2468b4f8380162f7d2fb002809d1b4f83c0162f7ccfb00280ad1962062f7c3faede707488ff789ff962062f7bcfae6e705488ff782ff962062f7b5fadfe75c543c4888290a4896290a485b42544e5d20564f4c2055500a005b42544e5d20564f4c20444f574e0a00204604b001b581b0064806490022064b009310237ff7fffc08b17ff706fe01b001bdd4290a483a290a480010000062746e776174636800")
 
-          try:
-              prog = currentProgram
-              mem = prog.getMemory()
-              fm = prog.getFunctionManager()
-              ctx = prog.getProgramContext()
-              tm = ctx.getRegister("TMode")
-              ctx.setValue(tm, toAddr(BASE + 0x100), mem.getMaxAddress(), BigInteger.ONE)
+          # verifications de securite avant d'ecrire
+          assert data[HOOK_OFFSET:HOOK_OFFSET+4] == HOOK_ORIG, \
+              "Octets inattendus au point d'accroche (fichier modifie ou offset incorrect) - ARRET"
+          cave_zone = data[CAVE_OFFSET:CAVE_OFFSET+len(CAVE_BYTES)]
+          assert all(b == 0 for b in cave_zone), \
+              "La zone libre (code cave) n'est pas vide - ARRET pour eviter d'ecraser du code"
 
-              seeds = [0x48026a8c, 0x48027408, 0x480218c4, 0x480215cc, 0x480216a0,
-                       0x4802e5ec, 0x4802e720, 0x4802e7b4, 0x4802ea84, 0x4802e960,
-                       0x480050ec, 0x480223bc, 0x480225d0]
-              for a in seeds:
-                  disassemble(toAddr(a))
-                  if fm.getFunctionAt(toAddr(a)) is None:
-                      createFunction(toAddr(a), None)
-              analyzeAll(prog)
-              log("fonctions: %d" % fm.getFunctionCount())
+          # application
+          data[CAVE_OFFSET:CAVE_OFFSET+len(CAVE_BYTES)] = CAVE_BYTES
+          data[HOOK_OFFSET:HOOK_OFFSET+4] = HOOK_NEW
 
-              di = DecompInterface(); di.openProgram(prog); mon = ConsoleTaskMonitor()
+          with open("lk_patched.img", "wb") as f:
+              f.write(data)
 
-              # 1) Désassemblage brut (hex + mnémonique) de FUN_4802ea84 en entier
-              f = fm.getFunctionAt(toAddr(0x4802ea84))
-              log("=" * 70)
-              log("DESASSEMBLAGE BRUT FUN_4802ea84")
-              listing = prog.getListing()
-              instr = listing.getInstructionAt(f.getEntryPoint())
-              end = f.getBody().getMaxAddress()
-              while instr is not None and instr.getAddress() <= end:
-                  b = instr.getBytes()
-                  log("%s  %s  %s" % (instr.getAddress(), ''.join('%02x' % (x & 0xff) for x in b), instr.toString()))
-                  instr = instr.getNext()
-
-              # 2) Desassemblage brut de fastboot_register autour de la creation du thread
-              log("=" * 70)
-              log("DESASSEMBLAGE BRUT autour de 0x48027800-0x48027890 (creation thread fastboot)")
-              a = toAddr(0x48027800)
-              endA = toAddr(0x48027895)
-              instr = listing.getInstructionAt(a)
-              if instr is None:
-                  instr = listing.getInstructionContaining(a)
-              while instr is not None and instr.getAddress() <= endA:
-                  b = instr.getBytes()
-                  log("%s  %s  %s" % (instr.getAddress(), ''.join('%02x' % (x & 0xff) for x in b), instr.toString()))
-                  instr = instr.getNext()
-
-              # 3) Chercher une zone de 0x00 (code cave) pres de la fin du code
-              log("=" * 70)
-              log("RECHERCHE CODE CAVE (octets 0x00 consecutifs)")
-              block = mem.getBlock(toAddr(BASE))
-              arr = bytearray(block.getSize())
-              block.getBytes(block.getStart(), arr)
-              run_start = None
-              best = []
-              for i in range(len(arr)):
-                  if arr[i] == 0:
-                      if run_start is None:
-                          run_start = i
-                  else:
-                      if run_start is not None and i - run_start > 200:
-                          best.append((run_start, i - run_start))
-                      run_start = None
-              for s, l in best[-10:]:
-                  log("cave @ 0x%x (offset fichier 0x%x) longueur %d" % (BASE + s, s + 0x200, l))
-
-              log("FIN")
-          except Exception:
-              log("ERREUR FATALE\n%s" % traceback.format_exc())
-          out.close()
+          print("Patch applique avec succes.")
+          print("Taille originale:", len(data), "octets (inchangee)")
           PYEOF
-
-      - name: Lancer Ghidra (headless)
-        run: |
-          mkdir -p proj
-          ./ghidra/support/analyzeHeadless proj lkproj \
-            -import lk.bin \
-            -processor "ARM:LE:32:v7" \
-            -loader BinaryLoader \
-            -loader-baseAddr "${{ github.event.inputs.base_addr }}" \
-            -noanalysis \
-            -scriptPath "$PWD" \
-            -postScript lk_report.py 2>&1 | tee ghidra.log
-
-      - name: Afficher le rapport
-        if: always()
-        run: |
-          head -c 60000 /tmp/report.txt || true
-          cp /tmp/report.txt . || true
+          ls -l lk_patched.img
 
       - uses: actions/upload-artifact@v4
-        if: always()
         with:
-          name: lk-report
-          path: |
-            report.txt
-            ghidra.log
+          name: lk-patched-stage1
+          path: lk_patched.img
