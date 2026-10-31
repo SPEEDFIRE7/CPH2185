@@ -85,9 +85,8 @@ jobs:
           sudo apt-get install -y --no-install-recommends \
             bc bison flex libssl-dev libelf-dev make gcc g++ cpio \
             git curl wget zip unzip xz-utils lz4 python3 python-is-python3 \
-            device-tree-compiler ccache libncurses-dev dos2unix
+            device-tree-compiler ccache libncurses-dev dos2unix jq
           df -h /
-
       - name: تنزيل مصدر النواة
         run: |
           BR=""
@@ -100,7 +99,6 @@ jobs:
           cd kernel
           echo "Commit: $(git log -1 --format='%h %s')"
           grep -E '^(VERSION|PATCHLEVEL|SUBLEVEL)' Makefile | head -3
-
       - name: استعادة كاش الـ toolchains
         id: tc
         uses: actions/cache@v4
@@ -122,7 +120,6 @@ jobs:
             https://android.googlesource.com/platform/prebuilts/gcc/linux-x86/aarch64/aarch64-linux-android-4.9 gcc64
           git clone --depth=1 -b "${{ inputs.gcc_branch }}" \
             https://android.googlesource.com/platform/prebuilts/gcc/linux-x86/arm/arm-linux-androideabi-4.9 gcc32
-
       - name: إعداد البيئة
         run: |
           echo "$GITHUB_WORKSPACE/clang-repo/${{ inputs.clang_dir }}/bin" >> $GITHUB_PATH
@@ -131,7 +128,6 @@ jobs:
           echo "KBUILD_BUILD_USER=builder" >> $GITHUB_ENV
           echo "KBUILD_BUILD_HOST=github-actions" >> $GITHUB_ENV
           "$GITHUB_WORKSPACE/clang-repo/${{ inputs.clang_dir }}/bin/clang" --version | head -1
-
       - name: استعادة كاش ccache
         uses: actions/cache@v4
         with:
@@ -140,7 +136,6 @@ jobs:
           restore-keys: |
             ccache-${{ inputs.defconfig }}-${{ inputs.add_ksu }}-
             ccache-${{ inputs.defconfig }}-
-
       - name: إيجاد defconfig
         working-directory: kernel
         run: |
@@ -153,7 +148,6 @@ jobs:
             echo "وجد في: $F"
             cp "$F" arch/arm64/configs/
           fi
-
       - name: إضافة KernelSU Next
         if: ${{ inputs.add_ksu }}
         working-directory: kernel
@@ -164,7 +158,6 @@ jobs:
           rm -f ksu_setup.sh
           ls -d KernelSU* || { echo "::error::فشل إضافة KernelSU"; exit 1; }
           KDIR=$(ls -d KernelSU* | head -1)
-
           # نوى 4.9 تفتقد هيدرات جديدة (compiler_types.h و sched/*.h ...)
           # نفحص كل #include <linux/...> في كود KernelSU وننشئ shim لما هو ناقص
           mkdir -p include/linux/sched
@@ -184,7 +177,6 @@ jobs:
             printf '#ifndef %s\n#define %s\n#include <%s>\n#endif\n' "$G" "$G" "$INC" > "include/$h"
             echo "shim: include/$h -> <$INC>"
           done
-
       - name: توافق 4.9 (kvmalloc)
         if: ${{ inputs.add_ksu }}
         working-directory: kernel
@@ -231,30 +223,24 @@ jobs:
                   n += 1
           print("files patched:", n)
           PYEOF
-
       - name: تطبيق hooks اليدوية (fs/ + reboot)
         if: ${{ inputs.add_ksu && inputs.ksu_mode == 'manual' }}
         working-directory: kernel
         run: |
           python3 - <<'PYEOF'
           import re, sys
-
           def read(p):
               return open(p, encoding="utf-8", errors="surrogateescape").read()
-
           def write(p, s):
               open(p, "w", encoding="utf-8", errors="surrogateescape").write(s)
-
           def fail(msg):
               print(f"::error::{msg}")
               sys.exit(1)
-
           def insert_before(s, anchor_re, text, start=0, label=""):
               m = re.compile(anchor_re, re.M).search(s, start)
               if not m:
                   fail(f"لم أجد الموضع المناسب ({label}) — عدّل هذا الملف يدويا")
               return s[:m.start()] + text + s[m.start():], m.start()
-
           def patch(path, fn):
               s = read(path)
               if "ksu_handle" in s:
@@ -263,7 +249,6 @@ jobs:
               s = fn(s)
               write(path, s)
               print(f"[+] {path}: تم")
-
           def exec_c(s):
               ext = ("#ifdef CONFIG_KSU\n__attribute__((hot))\n"
                      "extern int ksu_handle_execveat(int *fd, struct filename **filename_ptr,\n"
@@ -277,7 +262,6 @@ jobs:
               tail = tail.replace(ret, call + ret)
               print(f"    exec.c: {tail.count('ksu_handle_execveat((int')} استدعاء")
               return head + tail
-
           def open_c(s):
               ext = ("#ifdef CONFIG_KSU\n__attribute__((hot))\n"
                      "extern int ksu_handle_faccessat(int *dfd, const char __user **filename_user,\n"
@@ -287,7 +271,6 @@ jobs:
                   "#ifdef CONFIG_KSU\n\tksu_handle_faccessat(&dfd, &filename, &mode, NULL);\n#endif\n\n",
                   start=pos, label="faccessat body")
               return s
-
           def rw_c(s):
               ext = ("#ifdef CONFIG_KSU\nextern bool ksu_vfs_read_hook __read_mostly;\n"
                      "extern __attribute__((cold)) int ksu_handle_sys_read(unsigned int fd,\n"
@@ -297,7 +280,6 @@ jobs:
                   "#ifdef CONFIG_KSU\n\tif (unlikely(ksu_vfs_read_hook))\n\t\tksu_handle_sys_read(fd, &buf, &count);\n#endif\n",
                   start=pos, label="sys_read body")
               return s
-
           def stat_c(s):
               ext = ("#ifdef CONFIG_KSU\n__attribute__((hot))\n"
                      "extern int ksu_handle_stat(int *dfd, const char __user **filename_user,\n"
@@ -307,7 +289,6 @@ jobs:
                   "#ifdef CONFIG_KSU\n\tksu_handle_stat(&dfd, &filename, &flag);\n#endif\n",
                   start=pos, label="newfstatat body")
               return s
-
           def reboot_c(s):
               ext = ("#ifdef CONFIG_KSU\nextern int ksu_handle_sys_reboot(int magic1, int magic2, unsigned int cmd, void __user **arg);\n#endif\n\n")
               s, pos = insert_before(s, r"^SYSCALL_DEFINE4\(reboot,", ext, label="reboot")
@@ -315,7 +296,6 @@ jobs:
                   "#ifdef CONFIG_KSU\n\tksu_handle_sys_reboot(magic1, magic2, cmd, &arg);\n#endif\n",
                   start=pos, label="reboot body")
               return s
-
           patch("fs/exec.c", exec_c)
           patch("fs/open.c", open_c)
           patch("fs/read_write.c", rw_c)
@@ -323,7 +303,6 @@ jobs:
           patch("kernel/reboot.c", reboot_c)
           PYEOF
           git diff --stat || true
-
       - name: ضبط defconfig لـ KernelSU
         if: ${{ inputs.add_ksu }}
         working-directory: kernel
@@ -347,7 +326,6 @@ jobs:
             fi
           } >> "$DEF"
           tail -8 "$DEF"
-
       - name: تشخيص lcd_queue_load_tp_fw
         working-directory: kernel
         run: |
@@ -355,7 +333,6 @@ jobs:
           grep -rn "lcd_queue_load_tp_fw" --include=*.c --include=*.h . | grep -v "^./out/" | head -30 || true
           echo "---- خيارات اللمس في defconfig ----"
           grep -n -i "touchpanel\|TOUCH\|NT36\|NVT\|TP_" arch/arm64/configs/${{ inputs.defconfig }} | head -40 || true
-
       - name: تعريف ضعيف لـ lcd_queue_load_tp_fw (اختياري)
         if: ${{ inputs.weak_tp_stub }}
         working-directory: kernel
@@ -366,13 +343,14 @@ jobs:
             printf '\n/* fallback: تعريف ضعيف يُستبدل إن وُجد تعريف حقيقي */\nvoid __attribute__((weak)) lcd_queue_load_tp_fw(void) {}\n' >> "$F"
             echo "تمت إضافة التعريف الضعيف إلى $F"
           fi
-
       - name: بناء النواة
         id: build
         working-directory: kernel
         run: |
           set -o pipefail
           ccache -z || true
+          # MediaTek connectivity (mt66xx) يتطلب AUTOCONF_H (مسار autoconf.h المولّد)
+          export AUTOCONF_H="$PWD/out/include/generated/autoconf.h"
           MAKE_ARGS=(
             O=out
             ARCH=arm64
@@ -380,24 +358,26 @@ jobs:
             CLANG_TRIPLE=aarch64-linux-gnu-
             CROSS_COMPILE=aarch64-linux-android-
             CROSS_COMPILE_ARM32=arm-linux-androideabi-
+            "AUTOCONF_H=$AUTOCONF_H"
           )
           START=$(date +%s)
           make "${MAKE_ARGS[@]}" "${{ inputs.defconfig }}" ${{ inputs.extra_make_args }}
-
           if [ "${{ inputs.add_ksu }}" = "true" ]; then
             grep -q "^CONFIG_KSU=y" out/.config \
               || { echo "::error::CONFIG_KSU لم يُفعَّل في .config (تحقق من Kconfig)"; exit 1; }
           fi
-
+          # توليد autoconf.h قبل النزول إلى مجلدات drivers
+          make "${MAKE_ARGS[@]}" prepare ${{ inputs.extra_make_args }}
+          [ -f "$AUTOCONF_H" ] || echo "::warning::autoconf.h غير موجود في $AUTOCONF_H"
           make -j$(nproc --all) "${MAKE_ARGS[@]}" ${{ inputs.extra_make_args }} 2>&1 | tee ../build.log
           echo "secs=$(( $(date +%s) - START ))" >> $GITHUB_OUTPUT
           ccache -s || true
-
       - name: أخطاء البناء (عند الفشل)
         if: failure()
         run: |
           # السطر الذي يسبق "*** ... Error" هو السبب الحقيقي، لذلك نعرض ما قبله
-          L=$(grep -n -E "\*\*\* .*(vmlinux|\.o|\.ko).*Error" build.log | head -1 | cut -d: -f1)
+          L=$(grep -n -E "\*\*\* .*(vmlinux|\.o|\.ko|modules\.builtin).*Error" build.log | head -1 | cut -d: -f1)
+          [ -z "$L" ] && L=$(grep -n -E "\*\*\* " build.log | head -1 | cut -d: -f1)
           [ -z "$L" ] && L=$(wc -l < build.log)
           S=$(( L > 40 ? L - 40 : 1 ))
           {
@@ -409,8 +389,7 @@ jobs:
           echo "---- الأسطر ${S}-${L} ----"
           sed -n "${S},${L}p" build.log
           echo "---- كل الأخطاء ----"
-          grep -n -E "error:|undefined reference|ld(\.lld)?:|No such file|cannot find|overlap|relocation" build.log | tail -30 || true
-
+          grep -n -E "error:|undefined reference|ld(\.lld)?:|No such file|cannot find|overlap|relocation|\*\*\*" build.log | tail -30 || true
       - name: تجميع الملفات الناتجة
         run: |
           mkdir -p out_files
@@ -423,7 +402,6 @@ jobs:
           cp kernel/out/.config out_files/config
           ls -lh out_files
           [ -f "$B/Image" ] || { echo "::error::لم يتم إنتاج Image"; exit 1; }
-
       - name: إنشاء zip قابل للفلاش (AnyKernel3)
         if: ${{ inputs.make_zip }}
         continue-on-error: true
@@ -443,7 +421,6 @@ jobs:
           zip -r9 ../Kernel-flashable.zip . -x '*.git*'
           ls -lh ../Kernel-flashable.zip
           mv ../Kernel-flashable.zip ../out_files/
-
       - name: رفع الناتج إلى Gofile
         if: ${{ success() && inputs.upload_gofile }}
         continue-on-error: true
@@ -474,7 +451,6 @@ jobs:
           if [ -n "$URL" ]; then
             { echo "### 🔗 روابط Gofile"; echo "$URL"; } >> $GITHUB_STEP_SUMMARY
           fi
-
       - name: ملخص البناء
         if: success()
         run: |
@@ -489,14 +465,12 @@ jobs:
             ls -lh out_files
             echo '```'
           } >> $GITHUB_STEP_SUMMARY
-
       - name: رفع الناتج
         if: success()
         uses: actions/upload-artifact@v4
         with:
           name: kernel-output
           path: out_files/*
-
       - name: رفع سجل البناء
         if: always()
         uses: actions/upload-artifact@v4
