@@ -1,0 +1,73 @@
+name: Upload to GoFile
+
+on:
+  workflow_dispatch:
+    inputs:
+      path:
+        description: "مسار الملف أو المجلد داخل المستودع"
+        required: true
+        default: "output/"
+
+jobs:
+  upload:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Prepare upload
+        env:
+          UPLOAD_PATH: ${{ github.event.inputs.path }}
+        run: |
+          set -euo pipefail
+
+          if [ -z "$UPLOAD_PATH" ]; then
+            echo "ERROR: upload path is empty" >&2
+            exit 1
+          fi
+
+          TARGET="$(realpath -m "$GITHUB_WORKSPACE/$UPLOAD_PATH")"
+          case "$TARGET" in
+            "$GITHUB_WORKSPACE"|"$GITHUB_WORKSPACE"/*) ;;
+            *) echo "ERROR: path must be inside the repository" >&2; exit 1 ;;
+          esac
+
+          if [ -f "$TARGET" ]; then
+            cp "$TARGET" "$RUNNER_TEMP/$(basename "$TARGET")"
+            echo "UPLOAD_FILE=$RUNNER_TEMP/$(basename "$TARGET")" >> "$GITHUB_ENV"
+          elif [ -d "$TARGET" ]; then
+            ARCHIVE="$RUNNER_TEMP/$(basename "$TARGET").zip"
+            (cd "$TARGET" && zip -r -q "$ARCHIVE" .)
+            echo "UPLOAD_FILE=$ARCHIVE" >> "$GITHUB_ENV"
+          else
+            echo "ERROR: path not found: $UPLOAD_PATH" >&2
+            exit 1
+          fi
+
+      - name: Upload to GoFile
+        env:
+          GOFILE_TOKEN: ${{ secrets.GOFILE_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          AUTH_HEADER=()
+          if [ -n "${GOFILE_TOKEN:-}" ]; then
+            AUTH_HEADER=(-H "Authorization: Bearer $GOFILE_TOKEN")
+          fi
+
+          RESPONSE="$(curl -sS --fail-with-body \
+            "${AUTH_HEADER[@]}" \
+            -F "file=@${UPLOAD_FILE}" \
+            https://upload.gofile.io/uploadfile)"
+
+          STATUS="$(echo "$RESPONSE" | jq -r '.status')"
+          if [ "$STATUS" != "ok" ]; then
+            echo "ERROR: upload failed: $RESPONSE" >&2
+            exit 1
+          fi
+
+          LINK="$(echo "$RESPONSE" | jq -r '.data.downloadPage')"
+          echo "GoFile link: $LINK"
+          echo "- GoFile: $LINK" >> "$GITHUB_STEP_SUMMARY"
