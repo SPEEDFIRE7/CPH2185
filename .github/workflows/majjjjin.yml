@@ -1,50 +1,56 @@
-name: Upload to GoFile
+name: Upload URL to GoFile
 
 on:
   workflow_dispatch:
     inputs:
-      path:
-        description: "مسار الملف أو المجلد داخل المستودع"
+      url:
+        description: "رابط مباشر للملف (يجب أن يبدأ بـ https://)"
         required: true
-        default: "output/"
+      filename:
+        description: "اسم الملف بعد الرفع (اختياري، إذا تُرك فارغاً يُستخدم اسم الملف من الرابط)"
+        required: false
+        default: ""
 
 jobs:
   upload:
     runs-on: ubuntu-24.04
-    timeout-minutes: 60
+    timeout-minutes: 120
 
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Prepare upload
+      - name: Download file from URL
         env:
-          UPLOAD_PATH: ${{ github.event.inputs.path }}
+          SOURCE_URL: ${{ github.event.inputs.url }}
+          CUSTOM_NAME: ${{ github.event.inputs.filename }}
         run: |
           set -euo pipefail
 
-          if [ -z "$UPLOAD_PATH" ]; then
-            echo "ERROR: upload path is empty" >&2
-            exit 1
-          fi
-
-          TARGET="$(realpath -m "$GITHUB_WORKSPACE/$UPLOAD_PATH")"
-          case "$TARGET" in
-            "$GITHUB_WORKSPACE"|"$GITHUB_WORKSPACE"/*) ;;
-            *) echo "ERROR: path must be inside the repository" >&2; exit 1 ;;
+          case "$SOURCE_URL" in
+            https://*) ;;
+            *) echo "ERROR: URL must start with https://" >&2; exit 1 ;;
           esac
 
-          if [ -f "$TARGET" ]; then
-            cp "$TARGET" "$RUNNER_TEMP/$(basename "$TARGET")"
-            echo "UPLOAD_FILE=$RUNNER_TEMP/$(basename "$TARGET")" >> "$GITHUB_ENV"
-          elif [ -d "$TARGET" ]; then
-            ARCHIVE="$RUNNER_TEMP/$(basename "$TARGET").zip"
-            (cd "$TARGET" && zip -r -q "$ARCHIVE" .)
-            echo "UPLOAD_FILE=$ARCHIVE" >> "$GITHUB_ENV"
+          if [ -n "$CUSTOM_NAME" ]; then
+            NAME="$CUSTOM_NAME"
           else
-            echo "ERROR: path not found: $UPLOAD_PATH" >&2
+            NAME="$(basename "${SOURCE_URL%%\?*}")"
+          fi
+
+          case "$NAME" in
+            ""|.|..|*/*) echo "ERROR: invalid file name: $NAME" >&2; exit 1 ;;
+          esac
+
+          DEST="$RUNNER_TEMP/$NAME"
+          curl -sSL --fail --retry 3 --retry-delay 5 \
+            -o "$DEST" "$SOURCE_URL"
+
+          SIZE="$(stat -c %s "$DEST")"
+          if [ "$SIZE" -eq 0 ]; then
+            echo "ERROR: downloaded file is empty" >&2
             exit 1
           fi
+
+          echo "UPLOAD_FILE=$DEST" >> "$GITHUB_ENV"
+          echo "Downloaded $NAME ($SIZE bytes)"
 
       - name: Upload to GoFile
         env:
